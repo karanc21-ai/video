@@ -61,7 +61,10 @@ def env_required(name: str) -> str:
 
 def load_service_account_info() -> dict:
     """Load Google service account JSON from either raw JSON or base64 JSON."""
-    raw_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_B64", "").strip()
+    raw_b64 = (
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_B64", "").strip()
+        or os.getenv("GOOGLE_SHEETS_KEY_B64", "").strip()
+    )
     raw_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 
     if raw_b64:
@@ -69,7 +72,7 @@ def load_service_account_info() -> dict:
             decoded = base64.b64decode(raw_b64).decode("utf-8")
             return json.loads(decoded)
         except Exception as exc:
-            raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON_B64 is not valid base64 JSON") from exc
+            raise RuntimeError("Google service account base64 env var is not valid base64 JSON") from exc
 
     if raw_json:
         try:
@@ -78,7 +81,7 @@ def load_service_account_info() -> dict:
             raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON") from exc
 
     raise RuntimeError(
-        "Missing Google credentials. Set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_JSON_B64."
+        "Missing Google credentials. Set GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SERVICE_ACCOUNT_JSON_B64, or GOOGLE_SHEETS_KEY_B64."
     )
 
 
@@ -166,25 +169,19 @@ def twilio_is_configured() -> bool:
     required = [
         "TWILIO_ACCOUNT_SID",
         "TWILIO_AUTH_TOKEN",
-        "TWILIO_WHATSAPP_FROM",
         "ALERT_WHATSAPP_TO",
     ]
-    return all(os.getenv(name, "").strip() for name in required)
+
+    has_auth = all(os.getenv(name, "").strip() for name in required)
+    has_sender = bool(
+        os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
+        or os.getenv("TWILIO_MESSAGING_SERVICE_SID", "").strip()
+    )
+    return has_auth and has_sender
 
 
-def send_whatsapp_alert(lead: dict) -> None:
-    if not twilio_is_configured():
-        logger.info("Twilio env vars not fully configured. Skipping WhatsApp alert.")
-        return
-
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
-    from_number = os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
-    recipients = [x.strip() for x in os.getenv("ALERT_WHATSAPP_TO", "").split(",") if x.strip()]
-
-    client = Client(account_sid, auth_token)
+def build_alert_body(lead: dict) -> str:
     wa_link = customer_wa_link(lead.get("whatsapp", ""))
-
     lines = [
         "New Rudradhan video-call lead",
         f"Name: {lead.get('name', '')}",
@@ -199,12 +196,75 @@ def send_whatsapp_alert(lead: dict) -> None:
         lines.append(f"Message: {lead.get('message')}")
     if wa_link:
         lines.append(f"Open WhatsApp: {wa_link}")
+    return "\n".join(lines)
 
-    body = "\n".join(lines)
+
+def build_twilio_content_variables(lead: dict) -> str:
+    """
+    Variables for the approved Twilio WhatsApp Content template.
+
+    Recommended template body:
+
+    New Rudradhan video-call lead
+    Name: {{1}}
+    WhatsApp: {{2}}
+    Country: {{3}}
+    SKU: {{4}}
+    Preferred time: {{5}}
+    Product: {{6}}
+    Message: {{7}}
+    Open WhatsApp: {{8}}
+    """
+    variables = {
+        "1": lead.get("name", "") or "-",
+        "2": lead.get("whatsapp", "") or "-",
+        "3": lead.get("country", "") or "-",
+        "4": lead.get("sku", "") or "-",
+        "5": lead.get("preferred_time", "") or "-",
+        "6": lead.get("product_url", "") or "-",
+        "7": lead.get("message", "") or "-",
+        "8": customer_wa_link(lead.get("whatsapp", "")) or "-",
+    }
+    return json.dumps(variables)
+
+
+def twilio_sender_kwargs() -> dict:
+    messaging_service_sid = os.getenv("TWILIO_MESSAGING_SERVICE_SID", "").strip()
+    if messaging_service_sid:
+        return {"messaging_service_sid": messaging_service_sid}
+
+    from_number = os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
+    return {"from_": from_number}
+
+
+def send_whatsapp_alert(lead: dict) -> None:
+    if not twilio_is_configured():
+        logger.info("Twilio env vars not fully configured. Skipping WhatsApp alert.")
+        return
+
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+    content_sid = os.getenv("TWILIO_CONTENT_SID", "").strip()
+    recipients = [x.strip() for x in os.getenv("ALERT_WHATSAPP_TO", "").split(",") if x.strip()]
+
+    client = Client(account_sid, auth_token)
+    sender_kwargs = twilio_sender_kwargs()
 
     for to_number in recipients:
         try:
-            client.messages.create(from_=from_number, to=to_number, body=body)
+            if content_sid:
+                client.messages.create(
+                    **sender_kwargs,
+                    to=to_number,
+                    content_sid=content_sid,
+                    content_variables=build_twilio_content_variables(lead),
+                )
+            else:
+                client.messages.create(
+                    **sender_kwargs,
+                    to=to_number,
+                    body=build_alert_body(lead),
+                )
         except Exception:
             logger.exception("Failed to send Twilio WhatsApp alert to %s", to_number)
 
