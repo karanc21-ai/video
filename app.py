@@ -53,6 +53,26 @@ REQUIRE_READY_TO_SHIP = os.getenv("REQUIRE_READY_TO_SHIP", "true").strip().lower
 READY_PRODUCT_FETCH_LIMIT = int(os.getenv("READY_PRODUCT_FETCH_LIMIT", "100"))
 
 DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY", "India").strip() or "India"
+DEFAULT_COUNTRY_CODE = os.getenv("DEFAULT_COUNTRY_CODE", "+91").strip() or "+91"
+
+COUNTRY_CODE_OPTIONS = [
+    {"code": "+91", "label": "India (+91)"},
+    {"code": "+1", "label": "USA / Canada (+1)"},
+    {"code": "+44", "label": "United Kingdom (+44)"},
+    {"code": "+61", "label": "Australia (+61)"},
+    {"code": "+65", "label": "Singapore (+65)"},
+    {"code": "+971", "label": "UAE (+971)"},
+    {"code": "+966", "label": "Saudi Arabia (+966)"},
+    {"code": "+974", "label": "Qatar (+974)"},
+    {"code": "+965", "label": "Kuwait (+965)"},
+    {"code": "+973", "label": "Bahrain (+973)"},
+    {"code": "+968", "label": "Oman (+968)"},
+    {"code": "+60", "label": "Malaysia (+60)"},
+    {"code": "+852", "label": "Hong Kong (+852)"},
+    {"code": "+64", "label": "New Zealand (+64)"},
+    {"code": "+49", "label": "Germany (+49)"},
+    {"code": "+33", "label": "France (+33)"},
+]
 
 HEADERS = [
     "timestamp",
@@ -84,6 +104,8 @@ HEADERS = [
     "referrer",
     "status",
     "notes",
+    "country_code",
+    "phone_number",
 ]
 
 CHECKBOX_KEYS = {
@@ -202,6 +224,8 @@ def append_lead_to_sheet(lead):
         lead.get("referrer", ""),
         lead.get("status", "New"),
         lead.get("notes", ""),
+        lead.get("country_code", ""),
+        lead.get("phone_number", ""),
     ]
     worksheet.append_row(row, value_input_option="USER_ENTERED")
 
@@ -550,6 +574,48 @@ def appointment_display(appointment_date, appointment_time):
         return f"{appointment_date} {appointment_time}"
 
 
+
+# -----------------------------
+# Phone helpers
+# -----------------------------
+def normalize_country_code(country_code):
+    """Return country code as +NN, allowing pasted values with spaces or punctuation."""
+    raw = (country_code or DEFAULT_COUNTRY_CODE or "+91").strip()
+    digits = re.sub(r"\D", "", raw)
+    if not digits:
+        return "+91"
+    return "+" + digits
+
+
+def normalize_local_phone_number(phone_number):
+    """Allow spaces/dashes/brackets in user input and return only digits."""
+    return re.sub(r"\D", "", phone_number or "")
+
+
+def build_twilio_whatsapp_number(country_code, phone_number):
+    """
+    Build whatsapp:+E164 from a separate country-code dropdown and phone input.
+
+    Accepts phone numbers with spaces, dashes, brackets, or a full +country-code prefix.
+    If the customer types a full international number beginning with +, the typed number wins.
+    """
+    raw_phone = (phone_number or "").strip()
+    if not raw_phone:
+        return ""
+    if raw_phone.startswith("whatsapp:"):
+        return raw_phone
+
+    compact = re.sub(r"[\s().-]+", "", raw_phone)
+    if compact.startswith("+"):
+        digits = re.sub(r"\D", "", compact)
+        return "whatsapp:+" + digits if digits else ""
+
+    digits = normalize_local_phone_number(raw_phone).lstrip("0")
+    if not digits:
+        return ""
+
+    return "whatsapp:" + normalize_country_code(country_code) + digits
+
 # -----------------------------
 # Twilio WhatsApp
 # -----------------------------
@@ -567,10 +633,8 @@ def send_twilio_message(to_number, body=None, content_sid=None, content_variable
     """
     Send WhatsApp message through Twilio.
 
-    Important:
-    - If content_sid is supplied, this sends a Twilio Content Template message.
-    - Do NOT send a free-text body together with content_sid.
-      Twilio/WhatsApp can reject that combination with "Invalid Parameter".
+    If content_sid is supplied, this sends a Twilio Content Template message.
+    Do not send free-text body together with content_sid.
     """
     sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
     token = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
@@ -584,17 +648,11 @@ def send_twilio_message(to_number, body=None, content_sid=None, content_variable
         return None
 
     client = TwilioClient(sid, token)
-
-    kwargs = {
-        "to": to_number,
-        **sender,
-    }
+    kwargs = {"to": to_number, **sender}
 
     if content_sid:
         kwargs["content_sid"] = content_sid
-
         if content_variables:
-            # Twilio expects content_variables as a JSON string.
             kwargs["content_variables"] = json.dumps(
                 {str(k): str(v or "") for k, v in content_variables.items()}
             )
@@ -619,12 +677,9 @@ def send_internal_alert(lead):
     """
     Send internal team alert.
 
-    Recommended template:
+    Recommended Twilio/Meta template, no variables:
     New Rudradhan video-call request received. Please open the admin dashboard
     to review the request and contact the customer.
-
-    This internal template should ideally have no variables.
-    Full lead details stay in Google Sheet and /admin.
     """
     alert_to = os.getenv("ALERT_WHATSAPP_TO", "").strip()
     if not alert_to:
@@ -647,17 +702,9 @@ def send_internal_alert(lead):
     for to_number in recipients:
         try:
             if content_sid:
-                # Template mode: no body, no variables.
-                send_twilio_message(
-                    to_number=to_number,
-                    content_sid=content_sid,
-                )
+                send_twilio_message(to_number=to_number, content_sid=content_sid)
             else:
-                # Fallback only. May fail outside WhatsApp's allowed free-form session.
-                send_twilio_message(
-                    to_number=to_number,
-                    body=fallback_body,
-                )
+                send_twilio_message(to_number=to_number, body=fallback_body)
         except Exception as exc:
             app.logger.exception("Twilio internal alert failed for %s: %s", to_number, exc)
 
@@ -685,12 +732,6 @@ def send_customer_confirmation(lead):
     Recommended template:
     Hi {{1}}, your Rudradhan video-call request for {{2}} on {{3}} at {{4}}
     has been received. Our team will contact you on WhatsApp if any change is needed.
-
-    Variables:
-    {{1}} customer name
-    {{2}} product title or SKU
-    {{3}} appointment date
-    {{4}} appointment time
     """
     content_sid = os.getenv("TWILIO_CUSTOMER_CONTENT_SID", "").strip()
     if not content_sid:
@@ -701,12 +742,7 @@ def send_customer_confirmation(lead):
         app.logger.info("Customer confirmation skipped: customer WhatsApp missing/invalid")
         return
 
-    product_label = (
-        lead.get("product_title")
-        or lead.get("sku")
-        or "your selected jewellery"
-    )
-
+    product_label = lead.get("product_title") or lead.get("sku") or "your selected jewellery"
     variables = {
         "1": lead.get("name", "") or "there",
         "2": product_label,
@@ -715,13 +751,10 @@ def send_customer_confirmation(lead):
     }
 
     try:
-        send_twilio_message(
-            to_number=to_number,
-            content_sid=content_sid,
-            content_variables=variables,
-        )
+        send_twilio_message(to_number=to_number, content_sid=content_sid, content_variables=variables)
     except Exception as exc:
         app.logger.exception("Twilio customer confirmation failed: %s", exc)
+
 
 def normalize_whatsapp_for_twilio(phone, country=""):
     p = (phone or "").strip()
@@ -732,13 +765,11 @@ def normalize_whatsapp_for_twilio(phone, country=""):
     digits = re.sub(r"[^0-9+]", "", p)
     if digits.startswith("+"):
         return "whatsapp:" + digits
-    # Default Indian number handling. Let international users include country code.
     if len(digits) == 10 and (country or "").strip().lower() in {"", "india", "in"}:
         return "whatsapp:+91" + digits
     if digits.startswith("91") and len(digits) == 12:
         return "whatsapp:+" + digits
     return "whatsapp:+" + digits if digits else ""
-
 
 # -----------------------------
 # Auth
@@ -800,6 +831,8 @@ def book():
         can_book=can_book,
         not_ready=not_ready,
         default_country=DEFAULT_COUNTRY,
+        default_country_code=normalize_country_code(DEFAULT_COUNTRY_CODE),
+        country_code_options=COUNTRY_CODE_OPTIONS,
     )
 
 
@@ -819,6 +852,9 @@ def submit():
     product_handle = request.form.get("product_handle", "").strip()
     sku = request.form.get("sku", "").strip()
     store = request.form.get("store", DEFAULT_STORE).strip().lower() or DEFAULT_STORE
+    country_code = normalize_country_code(request.form.get("country_code", DEFAULT_COUNTRY_CODE))
+    phone_number = request.form.get("phone_number", "").strip()
+    whatsapp_number = build_twilio_whatsapp_number(country_code, phone_number)
 
     # Re-validate ready-to-ship where possible. Hidden fields are for convenience, not trust.
     if REQUIRE_READY_TO_SHIP and (product_handle or sku):
@@ -833,8 +869,10 @@ def submit():
     lead = {
         "timestamp": now,
         "name": request.form.get("name", "").strip(),
-        "whatsapp": request.form.get("whatsapp", "").strip(),
+        "whatsapp": whatsapp_number,
         "country": request.form.get("country", "").strip(),
+        "country_code": country_code,
+        "phone_number": phone_number,
         "appointment_date": appointment_date,
         "appointment_time": appointment_time,
         "appointment_datetime": appt_text,
@@ -862,7 +900,7 @@ def submit():
         "notes": "",
     }
 
-    required = ["name", "whatsapp", "country"]
+    required = ["name", "phone_number", "country"]
     missing = [key for key in required if not lead.get(key)]
     if missing:
         flash("Please fill name, WhatsApp number, and country.", "error")
@@ -871,7 +909,7 @@ def submit():
     append_lead_to_sheet(lead)
     send_internal_alert(lead)
     send_customer_confirmation(lead)
-    return redirect(url_for("thank_you", appt=appt_text))
+    return redirect(url_for("thank_you", appt=quote_plus(appt_text)))
 
 
 @app.route("/thank-you")
