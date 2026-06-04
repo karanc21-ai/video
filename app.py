@@ -1,36 +1,81 @@
 import base64
-import hmac
 import json
 import logging
 import os
 import re
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, date, time, timedelta
+from functools import wraps
+from urllib.parse import parse_qs, quote_plus, urlencode, urlparse
 
 import gspread
-from flask import Flask, Response, flash, redirect, render_template, request, url_for
-from twilio.rest import Client
+import requests
+from flask import (
+    Flask,
+    abort,
+    flash,
+    redirect,
+    render_template,
+    request,
+    session,
+    url_for,
+)
+from google.oauth2.service_account import Credentials
+from twilio.rest import Client as TwilioClient
+from zoneinfo import ZoneInfo
 
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "dev-only-change-this-secret")
+app.secret_key = os.getenv("SECRET_KEY", "change-this-secret-key")
+logging.basicConfig(level=logging.INFO)
 
-BRAND_NAME = os.getenv("BRAND_NAME", "Rudradhan")
-WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "video_call_leads")
-TIMEZONE = os.getenv("TIMEZONE", "Asia/Kolkata")
 
-SHEET_HEADERS = [
+# -----------------------------
+# Basic config
+# -----------------------------
+BRAND_NAME = os.getenv("BRAND_NAME", "Rudradhan").strip() or "Rudradhan"
+WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "video_call_leads").strip() or "video_call_leads"
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
+
+BOOKING_TIMEZONE = os.getenv("BOOKING_TIMEZONE", "Asia/Kolkata").strip() or "Asia/Kolkata"
+BOOKING_DAYS_AHEAD = int(os.getenv("BOOKING_DAYS_AHEAD", "14"))
+BOOKING_SLOT_START = os.getenv("BOOKING_SLOT_START", "16:00").strip()
+BOOKING_SLOT_END = os.getenv("BOOKING_SLOT_END", "19:30").strip()
+BOOKING_SLOT_INTERVAL_MINUTES = int(os.getenv("BOOKING_SLOT_INTERVAL_MINUTES", "10"))
+BOOKING_MIN_LEAD_MINUTES = int(os.getenv("BOOKING_MIN_LEAD_MINUTES", "60"))
+
+SHOPIFY_API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2025-07").strip() or "2025-07"
+DEFAULT_STORE = os.getenv("DEFAULT_STORE", "in").strip().lower() or "in"
+READY_METAFIELD_NAMESPACE = os.getenv("READY_METAFIELD_NAMESPACE", "custom").strip()
+READY_METAFIELD_KEY = os.getenv("READY_METAFIELD_KEY", "delivery_time").strip()
+READY_METAFIELD_VALUE = os.getenv("READY_METAFIELD_VALUE", "2-5 Days Across India").strip()
+REQUIRE_READY_TO_SHIP = os.getenv("REQUIRE_READY_TO_SHIP", "true").strip().lower() in {"1", "true", "yes", "y"}
+READY_PRODUCT_FETCH_LIMIT = int(os.getenv("READY_PRODUCT_FETCH_LIMIT", "100"))
+
+DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY", "India").strip() or "India"
+
+HEADERS = [
     "timestamp",
     "name",
     "whatsapp",
     "country",
-    "sku",
-    "product_url",
-    "preferred_time",
+    "appointment_date",
+    "appointment_time",
+    "appointment_datetime",
+    "check_actual_product",
+    "check_size_scale",
+    "check_color_shine",
+    "check_weight_comfort",
+    "check_styling",
+    "check_ready_to_ship",
     "message",
+    "store",
+    "product_title",
+    "sku",
+    "product_handle",
+    "product_url",
+    "product_image_url",
+    "product_image",
     "source",
     "campaign",
     "utm_source",
@@ -41,351 +86,775 @@ SHEET_HEADERS = [
     "notes",
 ]
 
-STATUS_OPTIONS = ["New", "Contacted", "Call Scheduled", "Completed", "Converted", "Lost"]
+CHECKBOX_KEYS = {
+    "actual_product": "Actual product clarity",
+    "size_scale": "Size / scale",
+    "color_shine": "Color and shine",
+    "weight_comfort": "Weight / comfort",
+    "styling": "Styling advice",
+    "ready_to_ship": "Ready-to-ship availability",
+}
 
 
-def now_text() -> str:
-    try:
-        tz = ZoneInfo(TIMEZONE)
-    except Exception:
-        tz = ZoneInfo("Asia/Kolkata")
-    return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
-
-
-def env_required(name: str) -> str:
-    value = os.getenv(name, "").strip()
-    if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return value
-
-
-def load_service_account_info() -> dict:
-    """Load Google service account JSON from either raw JSON or base64 JSON."""
+# -----------------------------
+# Google Sheets
+# -----------------------------
+def load_service_account_info():
     raw_b64 = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_B64", "").strip()
         or os.getenv("GOOGLE_SHEETS_KEY_B64", "").strip()
     )
-    raw_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 
     if raw_b64:
         try:
             decoded = base64.b64decode(raw_b64).decode("utf-8")
             return json.loads(decoded)
         except Exception as exc:
-            raise RuntimeError("Google service account base64 env var is not valid base64 JSON") from exc
+            raise RuntimeError("Base64 Google service account key is invalid") from exc
 
+    raw_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     if raw_json:
         try:
             return json.loads(raw_json)
-        except Exception as exc:
+        except json.JSONDecodeError as exc:
             raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON") from exc
 
     raise RuntimeError(
-        "Missing Google credentials. Set GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SERVICE_ACCOUNT_JSON_B64, or GOOGLE_SHEETS_KEY_B64."
+        "Missing Google credentials. Set GOOGLE_SHEETS_KEY_B64, "
+        "GOOGLE_SERVICE_ACCOUNT_JSON_B64, or GOOGLE_SERVICE_ACCOUNT_JSON."
     )
 
 
 def get_worksheet():
-    sheet_id = env_required("GOOGLE_SHEET_ID")
-    info = load_service_account_info()
-    gc = gspread.service_account_from_dict(info)
-    spreadsheet = gc.open_by_key(sheet_id)
+    if not GOOGLE_SHEET_ID:
+        raise RuntimeError("GOOGLE_SHEET_ID is missing")
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    credentials = Credentials.from_service_account_info(load_service_account_info(), scopes=scopes)
+    gc = gspread.authorize(credentials)
+    spreadsheet = gc.open_by_key(GOOGLE_SHEET_ID)
 
     try:
         worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
     except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(
-            title=WORKSHEET_NAME,
-            rows=1000,
-            cols=len(SHEET_HEADERS) + 2,
-        )
-        worksheet.update("A1", [SHEET_HEADERS])
-        return worksheet
+        worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=1000, cols=len(HEADERS) + 5)
 
-    first_row = worksheet.row_values(1)
-    if first_row[: len(SHEET_HEADERS)] != SHEET_HEADERS:
-        worksheet.update("A1", [SHEET_HEADERS])
+    existing_headers = worksheet.row_values(1)
+    if existing_headers != HEADERS:
+        worksheet.update("A1", [HEADERS])
     return worksheet
 
 
-def clean_str(value: str, limit: int = 500) -> str:
-    value = (value or "").strip()
-    value = re.sub(r"\s+", " ", value)
-    return value[:limit]
+def row_to_dict(row):
+    data = {}
+    for idx, header in enumerate(HEADERS):
+        data[header] = row[idx] if idx < len(row) else ""
+    return data
 
 
-def clean_url(value: str, limit: int = 1000) -> str:
-    return clean_str(value, limit=limit)
-
-
-def customer_wa_link(phone: str) -> str:
-    digits = re.sub(r"[^0-9]", "", phone or "")
-    if not digits:
-        return ""
-    return f"https://wa.me/{digits}"
-
-
-def build_lead_from_request():
-    return {
-        "timestamp": now_text(),
-        "name": clean_str(request.form.get("name"), 120),
-        "whatsapp": clean_str(request.form.get("whatsapp"), 80),
-        "country": clean_str(request.form.get("country"), 80),
-        "sku": clean_str(request.form.get("sku"), 120),
-        "product_url": clean_url(request.form.get("product_url"), 1000),
-        "preferred_time": clean_str(request.form.get("preferred_time"), 160),
-        "message": clean_str(request.form.get("message"), 1000),
-        "source": clean_str(request.form.get("source"), 120),
-        "campaign": clean_str(request.form.get("campaign"), 160),
-        "utm_source": clean_str(request.form.get("utm_source"), 160),
-        "utm_medium": clean_str(request.form.get("utm_medium"), 160),
-        "utm_campaign": clean_str(request.form.get("utm_campaign"), 160),
-        "referrer": clean_url(request.form.get("referrer"), 1000),
-        "status": "New",
-        "notes": "",
-    }
-
-
-def validate_lead(lead: dict) -> list[str]:
-    errors = []
-    if not lead["name"]:
-        errors.append("Please enter your name.")
-    if not lead["whatsapp"]:
-        errors.append("Please enter your WhatsApp number.")
-    if not lead["country"]:
-        errors.append("Please enter your country.")
-    if not lead["preferred_time"]:
-        errors.append("Please enter your preferred call time.")
-    return errors
-
-
-def append_lead_to_sheet(lead: dict) -> None:
+def get_all_leads():
     worksheet = get_worksheet()
-    row = [lead.get(header, "") for header in SHEET_HEADERS]
+    rows = worksheet.get_all_values()[1:]
+    leads = []
+    for i, row in enumerate(rows, start=2):
+        lead = row_to_dict(row)
+        lead["row_number"] = i
+        leads.append(lead)
+    leads.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    return leads
+
+
+def append_lead_to_sheet(lead):
+    worksheet = get_worksheet()
+    image_url = lead.get("product_image_url", "").strip()
+    image_formula = f'=IMAGE("{image_url}")' if image_url else ""
+
+    row = [
+        lead.get("timestamp", ""),
+        lead.get("name", ""),
+        lead.get("whatsapp", ""),
+        lead.get("country", ""),
+        lead.get("appointment_date", ""),
+        lead.get("appointment_time", ""),
+        lead.get("appointment_datetime", ""),
+        lead.get("check_actual_product", ""),
+        lead.get("check_size_scale", ""),
+        lead.get("check_color_shine", ""),
+        lead.get("check_weight_comfort", ""),
+        lead.get("check_styling", ""),
+        lead.get("check_ready_to_ship", ""),
+        lead.get("message", ""),
+        lead.get("store", ""),
+        lead.get("product_title", ""),
+        lead.get("sku", ""),
+        lead.get("product_handle", ""),
+        lead.get("product_url", ""),
+        image_url,
+        image_formula,
+        lead.get("source", ""),
+        lead.get("campaign", ""),
+        lead.get("utm_source", ""),
+        lead.get("utm_medium", ""),
+        lead.get("utm_campaign", ""),
+        lead.get("referrer", ""),
+        lead.get("status", "New"),
+        lead.get("notes", ""),
+    ]
     worksheet.append_row(row, value_input_option="USER_ENTERED")
 
 
-def twilio_is_configured() -> bool:
-    required = [
-        "TWILIO_ACCOUNT_SID",
-        "TWILIO_AUTH_TOKEN",
-        "ALERT_WHATSAPP_TO",
-    ]
+def update_lead_status(row_number, status, notes=""):
+    worksheet = get_worksheet()
+    if row_number < 2:
+        raise ValueError("Invalid row number")
+    status_col = HEADERS.index("status") + 1
+    notes_col = HEADERS.index("notes") + 1
+    worksheet.update_cell(row_number, status_col, status)
+    if notes:
+        worksheet.update_cell(row_number, notes_col, notes)
 
-    has_auth = all(os.getenv(name, "").strip() for name in required)
-    has_sender = bool(
-        os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
-        or os.getenv("TWILIO_MESSAGING_SERVICE_SID", "").strip()
+
+def get_booked_slots():
+    """Return set of (appointment_date, appointment_time) already taken."""
+    try:
+        leads = get_all_leads()
+    except Exception as exc:
+        app.logger.warning("Could not read booked slots from sheet: %s", exc)
+        return set()
+
+    booked = set()
+    for lead in leads:
+        status = (lead.get("status") or "").strip().lower()
+        if status in {"lost", "cancelled", "canceled"}:
+            continue
+        d = (lead.get("appointment_date") or "").strip()
+        t = (lead.get("appointment_time") or "").strip()
+        if d and t:
+            booked.add((d, t))
+    return booked
+
+
+# -----------------------------
+# Shopify
+# -----------------------------
+def get_store_config(store_key):
+    store = (store_key or DEFAULT_STORE).strip().lower()
+    if store in {"us", "usa", "rudradhan_us"}:
+        domain = os.getenv("SHOPIFY_US_SHOP_DOMAIN", "").strip()
+        token = os.getenv("SHOPIFY_US_ADMIN_ACCESS_TOKEN", "").strip()
+        return {"store": "us", "domain": domain, "token": token}
+
+    domain = os.getenv("SHOPIFY_IN_SHOP_DOMAIN", "").strip()
+    token = os.getenv("SHOPIFY_IN_ADMIN_ACCESS_TOKEN", "").strip()
+    return {"store": "in", "domain": domain, "token": token}
+
+
+def shopify_graphql(store_key, query, variables=None):
+    cfg = get_store_config(store_key)
+    if not cfg["domain"] or not cfg["token"]:
+        raise RuntimeError(f"Shopify config missing for store '{cfg['store']}'")
+
+    url = f"https://{cfg['domain']}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    response = requests.post(
+        url,
+        headers={
+            "X-Shopify-Access-Token": cfg["token"],
+            "Content-Type": "application/json",
+        },
+        json={"query": query, "variables": variables or {}},
+        timeout=20,
     )
-    return has_auth and has_sender
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("errors"):
+        raise RuntimeError(f"Shopify GraphQL error: {payload['errors']}")
+    return payload["data"]
 
 
-def build_alert_body(lead: dict) -> str:
-    wa_link = customer_wa_link(lead.get("whatsapp", ""))
-    lines = [
-        "New Rudradhan video-call lead",
-        f"Name: {lead.get('name', '')}",
-        f"WhatsApp: {lead.get('whatsapp', '')}",
-        f"Country: {lead.get('country', '')}",
-        f"SKU: {lead.get('sku', '') or '-'}",
-        f"Preferred time: {lead.get('preferred_time', '')}",
-    ]
-    if lead.get("product_url"):
-        lines.append(f"Product: {lead.get('product_url')}")
-    if lead.get("message"):
-        lines.append(f"Message: {lead.get('message')}")
-    if wa_link:
-        lines.append(f"Open WhatsApp: {wa_link}")
-    return "\n".join(lines)
-
-
-def build_twilio_content_variables(lead: dict) -> str:
-    """
-    Variables for the approved Twilio WhatsApp Content template.
-
-    Recommended template body:
-
-    New Rudradhan video-call lead
-    Name: {{1}}
-    WhatsApp: {{2}}
-    Country: {{3}}
-    SKU: {{4}}
-    Preferred time: {{5}}
-    Product: {{6}}
-    Message: {{7}}
-    Open WhatsApp: {{8}}
-    """
-    variables = {
-        "1": lead.get("name", "") or "-",
-        "2": lead.get("whatsapp", "") or "-",
-        "3": lead.get("country", "") or "-",
-        "4": lead.get("sku", "") or "-",
-        "5": lead.get("preferred_time", "") or "-",
-        "6": lead.get("product_url", "") or "-",
-        "7": lead.get("message", "") or "-",
-        "8": customer_wa_link(lead.get("whatsapp", "")) or "-",
+PRODUCT_FRAGMENT = """
+fragment ProductBookingFields on Product {
+  id
+  title
+  handle
+  status
+  onlineStoreUrl
+  featuredMedia {
+    preview { image { url altText } }
+  }
+  metafield(namespace: $readyNamespace, key: $readyKey) { value }
+  variants(first: 25) {
+    edges {
+      node {
+        id
+        sku
+        inventoryQuantity
+        image { url altText }
+      }
     }
-    return json.dumps(variables)
+  }
+}
+"""
 
 
-def twilio_sender_kwargs() -> dict:
+def normalize_product(node, store_key, requested_sku=""):
+    if not node:
+        return None
+
+    variants = [edge["node"] for edge in node.get("variants", {}).get("edges", [])]
+    chosen_variant = None
+    if requested_sku:
+        for v in variants:
+            if (v.get("sku") or "").strip().lower() == requested_sku.strip().lower():
+                chosen_variant = v
+                break
+    if not chosen_variant and variants:
+        chosen_variant = next((v for v in variants if (v.get("sku") or "").strip()), variants[0])
+
+    featured_image = ""
+    if node.get("featuredMedia"):
+        featured_image = (((node["featuredMedia"] or {}).get("preview") or {}).get("image") or {}).get("url") or ""
+
+    variant_image = ""
+    if chosen_variant and chosen_variant.get("image"):
+        variant_image = (chosen_variant.get("image") or {}).get("url") or ""
+
+    image_url = variant_image or featured_image
+    metafield_value = ((node.get("metafield") or {}).get("value") or "").strip()
+    ready = metafield_value == READY_METAFIELD_VALUE
+    online_url = node.get("onlineStoreUrl") or ""
+
+    return {
+        "store": store_key or DEFAULT_STORE,
+        "title": node.get("title") or "",
+        "handle": node.get("handle") or "",
+        "status": node.get("status") or "",
+        "sku": (chosen_variant or {}).get("sku") or requested_sku or "",
+        "product_url": online_url,
+        "image_url": image_url,
+        "ready_metafield_value": metafield_value,
+        "is_ready_to_ship": ready,
+    }
+
+
+def fetch_product_by_handle(store_key, handle):
+    if not handle:
+        return None
+    query = PRODUCT_FRAGMENT + """
+query ProductByHandle($productQuery: String!, $readyNamespace: String!, $readyKey: String!) {
+  products(first: 1, query: $productQuery) {
+    edges { node { ...ProductBookingFields } }
+  }
+}
+"""
+    data = shopify_graphql(
+        store_key,
+        query,
+        {
+            "productQuery": f"handle:{handle}",
+            "readyNamespace": READY_METAFIELD_NAMESPACE,
+            "readyKey": READY_METAFIELD_KEY,
+        },
+    )
+    edges = data.get("products", {}).get("edges", [])
+    return normalize_product(edges[0]["node"], store_key) if edges else None
+
+
+def fetch_product_by_sku(store_key, sku):
+    if not sku:
+        return None
+    query = PRODUCT_FRAGMENT + """
+query ProductBySku($variantQuery: String!, $readyNamespace: String!, $readyKey: String!) {
+  productVariants(first: 1, query: $variantQuery) {
+    edges {
+      node {
+        sku
+        product { ...ProductBookingFields }
+      }
+    }
+  }
+}
+"""
+    data = shopify_graphql(
+        store_key,
+        query,
+        {
+            "variantQuery": f"sku:{sku}",
+            "readyNamespace": READY_METAFIELD_NAMESPACE,
+            "readyKey": READY_METAFIELD_KEY,
+        },
+    )
+    edges = data.get("productVariants", {}).get("edges", [])
+    if not edges:
+        return None
+    variant_sku = edges[0]["node"].get("sku") or sku
+    return normalize_product(edges[0]["node"].get("product"), store_key, requested_sku=variant_sku)
+
+
+def fetch_product_from_request():
+    store = request.args.get("store", DEFAULT_STORE).strip().lower() or DEFAULT_STORE
+    handle = (request.args.get("handle") or "").strip()
+    sku = (request.args.get("sku") or "").strip()
+    product_url = (request.args.get("product_url") or "").strip()
+
+    if not handle and product_url:
+        handle = extract_handle_from_url(product_url) or ""
+
+    product = None
+    error = ""
+    try:
+        if handle:
+            product = fetch_product_by_handle(store, handle)
+        elif sku:
+            product = fetch_product_by_sku(store, sku)
+    except Exception as exc:
+        app.logger.exception("Shopify product lookup failed")
+        error = str(exc)
+
+    if product and product_url and not product.get("product_url"):
+        product["product_url"] = product_url
+
+    return product, error
+
+
+def fetch_ready_products(store_key, search=""):
+    query_text = "status:active"
+    if search:
+        # Shopify product search query supports terms; keep this simple.
+        query_text = f"status:active {search}"
+
+    gql = PRODUCT_FRAGMENT + """
+query ReadyProducts($productQuery: String!, $readyNamespace: String!, $readyKey: String!, $first: Int!) {
+  products(first: $first, query: $productQuery) {
+    edges { node { ...ProductBookingFields } }
+  }
+}
+"""
+    first = max(1, min(READY_PRODUCT_FETCH_LIMIT, 250))
+    data = shopify_graphql(
+        store_key,
+        gql,
+        {
+            "productQuery": query_text,
+            "readyNamespace": READY_METAFIELD_NAMESPACE,
+            "readyKey": READY_METAFIELD_KEY,
+            "first": first,
+        },
+    )
+    products = []
+    for edge in data.get("products", {}).get("edges", []):
+        p = normalize_product(edge["node"], store_key)
+        if p and p.get("is_ready_to_ship"):
+            products.append(p)
+    return products
+
+
+def extract_handle_from_url(value):
+    try:
+        parsed = urlparse(value)
+        path = parsed.path or ""
+    except Exception:
+        path = value or ""
+    match = re.search(r"/products/([^/?#]+)", path)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def build_book_url(product, source="instagram_story", campaign="ready_to_ship_video_call"):
+    base = request.url_root.rstrip("/") + url_for("book")
+    params = {
+        "store": product.get("store") or DEFAULT_STORE,
+        "handle": product.get("handle") or "",
+        "source": source,
+        "campaign": campaign,
+    }
+    sku = product.get("sku") or ""
+    if sku:
+        params["sku"] = sku
+    return base + "?" + urlencode(params)
+
+
+# -----------------------------
+# Booking slots
+# -----------------------------
+def parse_hhmm(value):
+    hour, minute = value.split(":", 1)
+    return time(int(hour), int(minute))
+
+
+def format_time_ampm(t):
+    hour = t.hour
+    minute = t.minute
+    suffix = "AM" if hour < 12 else "PM"
+    hour12 = hour % 12 or 12
+    return f"{hour12}:{minute:02d} {suffix}"
+
+
+def generate_booking_dates_and_slots():
+    tz = ZoneInfo(BOOKING_TIMEZONE)
+    now = datetime.now(tz)
+    start_t = parse_hhmm(BOOKING_SLOT_START)
+    end_t = parse_hhmm(BOOKING_SLOT_END)
+    interval = timedelta(minutes=BOOKING_SLOT_INTERVAL_MINUTES)
+    min_lead = timedelta(minutes=BOOKING_MIN_LEAD_MINUTES)
+    booked = get_booked_slots()
+
+    days = []
+    for offset in range(0, BOOKING_DAYS_AHEAD + 1):
+        d = (now + timedelta(days=offset)).date()
+        # Monday=0 ... Saturday=5, Sunday=6
+        if d.weekday() == 6:
+            continue
+
+        slots = []
+        current_dt = datetime.combine(d, start_t, tzinfo=tz)
+        end_dt = datetime.combine(d, end_t, tzinfo=tz)
+        while current_dt <= end_dt:
+            value_date = d.isoformat()
+            value_time = current_dt.strftime("%H:%M")
+            if current_dt >= now + min_lead and (value_date, value_time) not in booked:
+                slots.append({"value": value_time, "label": format_time_ampm(current_dt.time())})
+            current_dt += interval
+
+        if slots:
+            days.append(
+                {
+                    "value": d.isoformat(),
+                    "label": d.strftime("%a, %d %b %Y"),
+                    "slots": slots,
+                }
+            )
+    return days
+
+
+def is_valid_slot(appointment_date, appointment_time):
+    days = generate_booking_dates_and_slots()
+    for day in days:
+        if day["value"] == appointment_date:
+            return any(slot["value"] == appointment_time for slot in day["slots"])
+    return False
+
+
+def appointment_display(appointment_date, appointment_time):
+    if not appointment_date or not appointment_time:
+        return ""
+    try:
+        d = date.fromisoformat(appointment_date)
+        hh, mm = appointment_time.split(":")
+        t = time(int(hh), int(mm))
+        return f"{d.strftime('%a, %d %b %Y')} at {format_time_ampm(t)}"
+    except Exception:
+        return f"{appointment_date} {appointment_time}"
+
+
+# -----------------------------
+# Twilio WhatsApp
+# -----------------------------
+def twilio_sender_kwargs():
     messaging_service_sid = os.getenv("TWILIO_MESSAGING_SERVICE_SID", "").strip()
+    whatsapp_from = os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
     if messaging_service_sid:
         return {"messaging_service_sid": messaging_service_sid}
+    if whatsapp_from:
+        return {"from_": whatsapp_from}
+    return {}
 
-    from_number = os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
-    return {"from_": from_number}
+
+def send_twilio_message(to_number, body=None, content_sid=None, content_variables=None):
+    sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+    token = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+    if not sid or not token or not to_number:
+        app.logger.info("Twilio skipped: missing SID/token/to_number")
+        return None
+
+    sender = twilio_sender_kwargs()
+    if not sender:
+        app.logger.warning("Twilio skipped: missing TWILIO_WHATSAPP_FROM or TWILIO_MESSAGING_SERVICE_SID")
+        return None
+
+    client = TwilioClient(sid, token)
+    kwargs = {"to": to_number, **sender}
+    if content_sid:
+        kwargs["content_sid"] = content_sid
+        if content_variables:
+            kwargs["content_variables"] = json.dumps(content_variables)
+    else:
+        kwargs["body"] = body or "New Rudradhan video-call request received. Please open the admin dashboard."
+
+    msg = client.messages.create(**kwargs)
+    app.logger.info("Twilio message created: sid=%s status=%s to=%s", msg.sid, msg.status, to_number)
+    return msg
 
 
-def send_whatsapp_alert(lead: dict) -> None:
-    if not twilio_is_configured():
-        logger.info("Twilio env vars not fully configured. Skipping WhatsApp alert.")
+def send_internal_alert(lead):
+    alert_to = os.getenv("ALERT_WHATSAPP_TO", "").strip()
+    if not alert_to:
         return
 
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
-    content_sid = os.getenv("TWILIO_CONTENT_SID", "").strip()
-    recipients = [x.strip() for x in os.getenv("ALERT_WHATSAPP_TO", "").split(",") if x.strip()]
+    recipients = [x.strip() for x in alert_to.split(",") if x.strip()]
+    content_sid = (
+        os.getenv("TWILIO_ALERT_CONTENT_SID", "").strip()
+        or os.getenv("TWILIO_CONTENT_SID", "").strip()
+    )
 
-    client = Client(account_sid, auth_token)
-    sender_kwargs = twilio_sender_kwargs()
+    dashboard_url = request.url_root.rstrip("/") + url_for("admin")
+    body = (
+        "New Rudradhan video-call request received.\n"
+        f"Product: {lead.get('product_title') or lead.get('sku') or 'Not specified'}\n"
+        f"Appointment: {lead.get('appointment_display', '')}\n"
+        f"Open dashboard: {dashboard_url}"
+    )
 
     for to_number in recipients:
         try:
-            if content_sid:
-                client.messages.create(
-                    **sender_kwargs,
-                    to=to_number,
-                    content_sid=content_sid,
-                    content_variables=build_twilio_content_variables(lead),
-                )
-            else:
-                client.messages.create(
-                    **sender_kwargs,
-                    to=to_number,
-                    body=build_alert_body(lead),
-                )
-        except Exception:
-            logger.exception("Failed to send Twilio WhatsApp alert to %s", to_number)
+            # Recommended: use a no-variable approved Utility template.
+            send_twilio_message(to_number, body=body, content_sid=content_sid or None)
+        except Exception as exc:
+            app.logger.exception("Twilio internal alert failed for %s: %s", to_number, exc)
 
 
-def get_query_defaults():
-    return {
-        "sku": clean_str(request.args.get("sku"), 120),
-        "product_url": clean_url(request.args.get("product_url"), 1000),
-        "source": clean_str(request.args.get("source") or request.args.get("utm_source"), 120),
-        "campaign": clean_str(request.args.get("campaign") or request.args.get("utm_campaign"), 160),
-        "utm_source": clean_str(request.args.get("utm_source"), 160),
-        "utm_medium": clean_str(request.args.get("utm_medium"), 160),
-        "utm_campaign": clean_str(request.args.get("utm_campaign"), 160),
-    }
+def send_customer_confirmation(lead):
+    content_sid = os.getenv("TWILIO_CUSTOMER_CONTENT_SID", "").strip()
+    if not content_sid:
+        return
+
+    raw_phone = normalize_whatsapp_for_twilio(lead.get("whatsapp", ""), lead.get("country", ""))
+    if not raw_phone:
+        return
+
+    try:
+        send_twilio_message(
+            raw_phone,
+            content_sid=content_sid,
+            content_variables={"1": lead.get("name", "") or "there"},
+        )
+    except Exception as exc:
+        app.logger.exception("Twilio customer confirmation failed: %s", exc)
 
 
-def admin_password() -> str:
-    return os.getenv("ADMIN_PASSWORD", "").strip()
+def normalize_whatsapp_for_twilio(phone, country=""):
+    p = (phone or "").strip()
+    if not p:
+        return ""
+    if p.startswith("whatsapp:"):
+        return p
+    digits = re.sub(r"[^0-9+]", "", p)
+    if digits.startswith("+"):
+        return "whatsapp:" + digits
+    # Default Indian number handling. Let international users include country code.
+    if len(digits) == 10 and (country or "").strip().lower() in {"", "india", "in"}:
+        return "whatsapp:+91" + digits
+    if digits.startswith("91") and len(digits) == 12:
+        return "whatsapp:+" + digits
+    return "whatsapp:+" + digits if digits else ""
 
 
-def is_admin_authorized() -> bool:
-    password = admin_password()
-    if not password:
-        return False
-    auth = request.authorization
-    if not auth:
-        return False
-    username_ok = hmac.compare_digest(auth.username or "", "admin")
-    password_ok = hmac.compare_digest(auth.password or "", password)
-    return username_ok and password_ok
+# -----------------------------
+# Auth
+# -----------------------------
+def admin_required(view_func):
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        if session.get("admin_ok"):
+            return view_func(*args, **kwargs)
+        return redirect(url_for("admin_login", next=request.path))
+
+    return wrapper
 
 
-def require_admin():
-    return Response(
-        "Admin login required",
-        401,
-        {"WWW-Authenticate": 'Basic realm="Rudradhan Video Call Admin"'},
-    )
-
-
+# -----------------------------
+# Routes
+# -----------------------------
 @app.route("/healthz")
 def healthz():
-    return {"ok": True, "service": "rudradhan-video-call-app"}
+    return "ok", 200
 
 
-@app.route("/", methods=["GET"])
+@app.route("/")
 def index():
+    return redirect(url_for("book", **request.args.to_dict()))
+
+
+@app.route("/book")
+def book():
+    product, product_error = fetch_product_from_request()
+    booking_days = generate_booking_dates_and_slots()
+    query_defaults = {
+        "store": request.args.get("store", DEFAULT_STORE),
+        "handle": request.args.get("handle", ""),
+        "sku": request.args.get("sku", ""),
+        "source": request.args.get("source", ""),
+        "campaign": request.args.get("campaign", ""),
+        "utm_source": request.args.get("utm_source", ""),
+        "utm_medium": request.args.get("utm_medium", ""),
+        "utm_campaign": request.args.get("utm_campaign", ""),
+        "product_url": request.args.get("product_url", ""),
+        "referrer": request.headers.get("Referer", ""),
+    }
+    can_book = bool(product) and bool(booking_days)
+    not_ready = False
+    if product and REQUIRE_READY_TO_SHIP and not product.get("is_ready_to_ship"):
+        can_book = False
+        not_ready = True
+
     return render_template(
         "index.html",
         brand_name=BRAND_NAME,
-        defaults=get_query_defaults(),
+        product=product,
+        product_error=product_error,
+        defaults=query_defaults,
+        booking_days=booking_days,
+        booking_days_json=json.dumps(booking_days),
+        checkbox_keys=CHECKBOX_KEYS,
+        can_book=can_book,
+        not_ready=not_ready,
+        default_country=DEFAULT_COUNTRY,
     )
 
 
 @app.route("/submit", methods=["POST"])
 def submit():
-    lead = build_lead_from_request()
-    errors = validate_lead(lead)
-    if errors:
-        for err in errors:
-            flash(err, "error")
-        return render_template("index.html", brand_name=BRAND_NAME, defaults=lead), 400
+    appointment_date = request.form.get("appointment_date", "").strip()
+    appointment_time = request.form.get("appointment_time", "").strip()
+    if not is_valid_slot(appointment_date, appointment_time):
+        flash("That appointment slot is no longer available. Please choose another time.", "error")
+        return redirect(request.referrer or url_for("book"))
+
+    checks = set(request.form.getlist("checks"))
+    now = datetime.now(ZoneInfo(BOOKING_TIMEZONE)).isoformat(timespec="seconds")
+    appt_text = appointment_display(appointment_date, appointment_time)
+
+    product_title = request.form.get("product_title", "").strip()
+    product_handle = request.form.get("product_handle", "").strip()
+    sku = request.form.get("sku", "").strip()
+    store = request.form.get("store", DEFAULT_STORE).strip().lower() or DEFAULT_STORE
+
+    # Re-validate ready-to-ship where possible. Hidden fields are for convenience, not trust.
+    if REQUIRE_READY_TO_SHIP and (product_handle or sku):
+        try:
+            product = fetch_product_by_handle(store, product_handle) if product_handle else fetch_product_by_sku(store, sku)
+            if product and not product.get("is_ready_to_ship"):
+                flash("This item is not currently marked ready-to-ship for video booking.", "error")
+                return redirect(request.referrer or url_for("book"))
+        except Exception as exc:
+            app.logger.warning("Ready-to-ship revalidation skipped: %s", exc)
+
+    lead = {
+        "timestamp": now,
+        "name": request.form.get("name", "").strip(),
+        "whatsapp": request.form.get("whatsapp", "").strip(),
+        "country": request.form.get("country", "").strip(),
+        "appointment_date": appointment_date,
+        "appointment_time": appointment_time,
+        "appointment_datetime": appt_text,
+        "appointment_display": appt_text,
+        "check_actual_product": "Yes" if "actual_product" in checks else "",
+        "check_size_scale": "Yes" if "size_scale" in checks else "",
+        "check_color_shine": "Yes" if "color_shine" in checks else "",
+        "check_weight_comfort": "Yes" if "weight_comfort" in checks else "",
+        "check_styling": "Yes" if "styling" in checks else "",
+        "check_ready_to_ship": "Yes" if "ready_to_ship" in checks else "",
+        "message": request.form.get("message", "").strip(),
+        "store": store,
+        "product_title": product_title,
+        "sku": sku,
+        "product_handle": product_handle,
+        "product_url": request.form.get("product_url", "").strip(),
+        "product_image_url": request.form.get("product_image_url", "").strip(),
+        "source": request.form.get("source", "").strip(),
+        "campaign": request.form.get("campaign", "").strip(),
+        "utm_source": request.form.get("utm_source", "").strip(),
+        "utm_medium": request.form.get("utm_medium", "").strip(),
+        "utm_campaign": request.form.get("utm_campaign", "").strip(),
+        "referrer": request.form.get("referrer", "").strip() or request.headers.get("Referer", ""),
+        "status": "New",
+        "notes": "",
+    }
+
+    required = ["name", "whatsapp", "country"]
+    missing = [key for key in required if not lead.get(key)]
+    if missing:
+        flash("Please fill name, WhatsApp number, and country.", "error")
+        return redirect(request.referrer or url_for("book"))
 
     append_lead_to_sheet(lead)
-    send_whatsapp_alert(lead)
-    return redirect(url_for("thank_you"))
+    send_internal_alert(lead)
+    send_customer_confirmation(lead)
+    return redirect(url_for("thank_you", appt=quote_plus(appt_text)))
 
 
-@app.route("/thank-you", methods=["GET"])
+@app.route("/thank-you")
 def thank_you():
-    return render_template("thank_you.html", brand_name=BRAND_NAME)
+    return render_template("thank_you.html", brand_name=BRAND_NAME, appointment=request.args.get("appt", ""))
 
 
-@app.route("/admin", methods=["GET"])
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        if ADMIN_PASSWORD and password == ADMIN_PASSWORD:
+            session["admin_ok"] = True
+            return redirect(request.args.get("next") or url_for("admin"))
+        flash("Wrong password.", "error")
+    return render_template("login.html", brand_name=BRAND_NAME)
+
+
+@app.route("/admin/logout")
+def admin_logout():
+    session.clear()
+    return redirect(url_for("admin_login"))
+
+
+@app.route("/admin")
+@admin_required
 def admin():
-    if not is_admin_authorized():
-        return require_admin()
+    leads = get_all_leads()
+    return render_template("admin.html", brand_name=BRAND_NAME, leads=leads)
 
-    worksheet = get_worksheet()
-    records = worksheet.get_all_records(expected_headers=SHEET_HEADERS)
-    leads = []
-    for idx, row in enumerate(records, start=2):
-        item = dict(row)
-        item["row_number"] = idx
-        item["customer_wa_link"] = customer_wa_link(item.get("whatsapp", ""))
-        leads.append(item)
-    leads.reverse()
+
+@app.route("/admin/update-status", methods=["POST"])
+@admin_required
+def admin_update_status():
+    row_number = int(request.form.get("row_number", "0"))
+    status = request.form.get("status", "New").strip()
+    notes = request.form.get("notes", "").strip()
+    update_lead_status(row_number, status, notes)
+    return redirect(url_for("admin"))
+
+
+@app.route("/admin/products")
+@admin_required
+def admin_products():
+    store = request.args.get("store", DEFAULT_STORE).strip().lower() or DEFAULT_STORE
+    search = request.args.get("q", "").strip()
+    products = []
+    error = ""
+    try:
+        products = fetch_ready_products(store, search=search)
+    except Exception as exc:
+        app.logger.exception("Ready products fetch failed")
+        error = str(exc)
+
+    for p in products:
+        p["story_link"] = build_book_url(p, source="instagram_story", campaign="ready_to_ship_video_call")
+        p["product_page_link"] = build_book_url(p, source="product_page", campaign="ready_to_ship_video_call")
 
     return render_template(
-        "admin.html",
+        "products.html",
         brand_name=BRAND_NAME,
-        leads=leads,
-        status_options=STATUS_OPTIONS,
+        products=products,
+        store=store,
+        search=search,
+        error=error,
     )
 
 
-@app.route("/admin/update", methods=["POST"])
-def admin_update():
-    if not is_admin_authorized():
-        return require_admin()
-
-    row_number = int(request.form.get("row_number", "0"))
-    status = clean_str(request.form.get("status"), 80)
-    notes = clean_str(request.form.get("notes"), 1000)
-
-    if row_number < 2:
-        flash("Invalid row number.", "error")
-        return redirect(url_for("admin"))
-
-    if status not in STATUS_OPTIONS:
-        flash("Invalid status.", "error")
-        return redirect(url_for("admin"))
-
-    worksheet = get_worksheet()
-    status_col = SHEET_HEADERS.index("status") + 1
-    notes_col = SHEET_HEADERS.index("notes") + 1
-    worksheet.update_cell(row_number, status_col, status)
-    worksheet.update_cell(row_number, notes_col, notes)
-
-    flash("Lead updated.", "success")
-    return redirect(url_for("admin"))
+@app.template_filter("yesno")
+def yesno_filter(value):
+    return "Yes" if value else "No"
 
 
 if __name__ == "__main__":
