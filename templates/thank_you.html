@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Thank You | {{ brand_name }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="page-shell">
+    <section class="hero-card thank-you-card">
+      <div class="brand-mark">{{ brand_name }}</div>
+      <p class="eyebrow">Request received</p>
+      <h1>Thank You</h1>
+      <p class="lead-text">
+        Our team will contact you shortly on WhatsApp to confirm the video call.
+      </p>
+      <a class="secondary-link" href="/">Book another call</a>
+    </section>
+  </main>
+</body>
+</html>
