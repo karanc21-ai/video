@@ -3,19 +3,24 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Thank You | {{ brand_name }}</title>
+  <title>Thank you | {{ brand_name }}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-  <main class="page-shell">
-    <section class="hero-card thank-you-card">
-      <div class="brand-mark">{{ brand_name }}</div>
-      <p class="eyebrow">Request received</p>
-      <h1>Thank You</h1>
-      <p class="lead-text">
-        Our team will contact you shortly on WhatsApp to confirm the video call.
-      </p>
-      <a class="secondary-link" href="/">Book another call</a>
+  <main class="page-shell compact">
+    <section class="booking-card thank-card">
+      <div class="brand-strip centered">
+        <div class="brand-mark">R</div>
+        <div>
+          <div class="brand-name">{{ brand_name }}</div>
+          <div class="brand-subtitle">Video shopping appointment</div>
+        </div>
+      </div>
+      <div class="success-icon">✓</div>
+      <h1>Request received.</h1>
+      {% if appointment %}<p class="lead-text">Your selected slot is <strong>{{ appointment }}</strong>.</p>{% endif %}
+      <p class="lead-text">Our team will contact you on WhatsApp to confirm the video call.</p>
+      <a class="secondary-button" href="/book">Book another appointment</a>
     </section>
   </main>
 </body>
