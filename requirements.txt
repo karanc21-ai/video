@@ -1,0 +1,5 @@
+Flask==3.0.3
+gunicorn==23.0.0
+gspread==6.1.4
+google-auth==2.35.0
+twilio==9.3.6
