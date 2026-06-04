@@ -564,6 +564,14 @@ def twilio_sender_kwargs():
 
 
 def send_twilio_message(to_number, body=None, content_sid=None, content_variables=None):
+    """
+    Send WhatsApp message through Twilio.
+
+    Important:
+    - If content_sid is supplied, this sends a Twilio Content Template message.
+    - Do NOT send a free-text body together with content_sid.
+      Twilio/WhatsApp can reject that combination with "Invalid Parameter".
+    """
     sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
     token = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
     if not sid or not token or not to_number:
@@ -576,22 +584,51 @@ def send_twilio_message(to_number, body=None, content_sid=None, content_variable
         return None
 
     client = TwilioClient(sid, token)
-    kwargs = {"to": to_number, **sender}
+
+    kwargs = {
+        "to": to_number,
+        **sender,
+    }
+
     if content_sid:
         kwargs["content_sid"] = content_sid
+
         if content_variables:
-            kwargs["content_variables"] = json.dumps(content_variables)
+            # Twilio expects content_variables as a JSON string.
+            kwargs["content_variables"] = json.dumps(
+                {str(k): str(v or "") for k, v in content_variables.items()}
+            )
     else:
-        kwargs["body"] = body or "New Rudradhan video-call request received. Please open the admin dashboard."
+        if not body:
+            app.logger.warning("Twilio skipped: no body/content_sid supplied")
+            return None
+        kwargs["body"] = body
 
     msg = client.messages.create(**kwargs)
-    app.logger.info("Twilio message created: sid=%s status=%s to=%s", msg.sid, msg.status, to_number)
+    app.logger.info(
+        "Twilio message created: sid=%s status=%s to=%s content_sid=%s",
+        getattr(msg, "sid", None),
+        getattr(msg, "status", None),
+        to_number,
+        content_sid or "",
+    )
     return msg
 
 
 def send_internal_alert(lead):
+    """
+    Send internal team alert.
+
+    Recommended template:
+    New Rudradhan video-call request received. Please open the admin dashboard
+    to review the request and contact the customer.
+
+    This internal template should ideally have no variables.
+    Full lead details stay in Google Sheet and /admin.
+    """
     alert_to = os.getenv("ALERT_WHATSAPP_TO", "").strip()
     if not alert_to:
+        app.logger.info("ALERT_WHATSAPP_TO not set. Skipping internal alert.")
         return
 
     recipients = [x.strip() for x in alert_to.split(",") if x.strip()]
@@ -601,39 +638,90 @@ def send_internal_alert(lead):
     )
 
     dashboard_url = request.url_root.rstrip("/") + url_for("admin")
-    body = (
-        "New Rudradhan video-call request received.\n"
-        f"Product: {lead.get('product_title') or lead.get('sku') or 'Not specified'}\n"
-        f"Appointment: {lead.get('appointment_display', '')}\n"
-        f"Open dashboard: {dashboard_url}"
+    fallback_body = (
+        "New Rudradhan video-call request received. "
+        "Please open the admin dashboard to review the request and contact the customer.\n"
+        f"{dashboard_url}"
     )
 
     for to_number in recipients:
         try:
-            # Recommended: use a no-variable approved Utility template.
-            send_twilio_message(to_number, body=body, content_sid=content_sid or None)
+            if content_sid:
+                # Template mode: no body, no variables.
+                send_twilio_message(
+                    to_number=to_number,
+                    content_sid=content_sid,
+                )
+            else:
+                # Fallback only. May fail outside WhatsApp's allowed free-form session.
+                send_twilio_message(
+                    to_number=to_number,
+                    body=fallback_body,
+                )
         except Exception as exc:
             app.logger.exception("Twilio internal alert failed for %s: %s", to_number, exc)
 
 
+def format_customer_date(value):
+    try:
+        d = date.fromisoformat(value)
+        return d.strftime("%d %b %Y")
+    except Exception:
+        return value or ""
+
+
+def format_customer_time(value):
+    try:
+        hh, mm = value.split(":", 1)
+        return format_time_ampm(time(int(hh), int(mm)))
+    except Exception:
+        return value or ""
+
+
 def send_customer_confirmation(lead):
+    """
+    Optional customer confirmation.
+
+    Recommended template:
+    Hi {{1}}, your Rudradhan video-call request for {{2}} on {{3}} at {{4}}
+    has been received. Our team will contact you on WhatsApp if any change is needed.
+
+    Variables:
+    {{1}} customer name
+    {{2}} product title or SKU
+    {{3}} appointment date
+    {{4}} appointment time
+    """
     content_sid = os.getenv("TWILIO_CUSTOMER_CONTENT_SID", "").strip()
     if not content_sid:
         return
 
-    raw_phone = normalize_whatsapp_for_twilio(lead.get("whatsapp", ""), lead.get("country", ""))
-    if not raw_phone:
+    to_number = normalize_whatsapp_for_twilio(lead.get("whatsapp", ""), lead.get("country", ""))
+    if not to_number:
+        app.logger.info("Customer confirmation skipped: customer WhatsApp missing/invalid")
         return
+
+    product_label = (
+        lead.get("product_title")
+        or lead.get("sku")
+        or "your selected jewellery"
+    )
+
+    variables = {
+        "1": lead.get("name", "") or "there",
+        "2": product_label,
+        "3": format_customer_date(lead.get("appointment_date", "")),
+        "4": format_customer_time(lead.get("appointment_time", "")),
+    }
 
     try:
         send_twilio_message(
-            raw_phone,
+            to_number=to_number,
             content_sid=content_sid,
-            content_variables={"1": lead.get("name", "") or "there"},
+            content_variables=variables,
         )
     except Exception as exc:
         app.logger.exception("Twilio customer confirmation failed: %s", exc)
-
 
 def normalize_whatsapp_for_twilio(phone, country=""):
     p = (phone or "").strip()
@@ -783,7 +871,7 @@ def submit():
     append_lead_to_sheet(lead)
     send_internal_alert(lead)
     send_customer_confirmation(lead)
-    return redirect(url_for("thank_you", appt=quote_plus(appt_text)))
+    return redirect(url_for("thank_you", appt=appt_text))
 
 
 @app.route("/thank-you")
