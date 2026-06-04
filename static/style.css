@@ -257,6 +257,25 @@ input:focus, select:focus, textarea:focus {
   box-shadow: 0 0 0 4px rgba(169, 117, 43, 0.14);
 }
 
+.phone-input-row {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 10px;
+}
+
+.country-code-select {
+  padding-left: 10px;
+  padding-right: 8px;
+}
+
+.input-help {
+  display: block;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 textarea { resize: vertical; }
 
 .check-section { margin: 20px 0; }
@@ -469,7 +488,8 @@ select:disabled {
   .check-grid,
   .lead-card,
   .product-search,
-  .product-grid-admin {
+  .product-grid-admin,
+  .phone-input-row {
     grid-template-columns: 1fr;
   }
 
