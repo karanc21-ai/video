@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Video Call Leads Admin | {{ brand_name }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="admin-body">
+  <main class="admin-shell">
+    <header class="admin-header">
+      <div>
+        <div class="brand-mark">{{ brand_name }}</div>
+        <h1>Video Call Leads</h1>
+      </div>
+      <p>{{ leads|length }} lead{{ '' if leads|length == 1 else 's' }}</p>
+    </header>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-wrap">
+          {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <div class="lead-list">
+      {% for lead in leads %}
+        <article class="lead-card">
+          <div class="lead-top">
+            <div>
+              <h2>{{ lead.get('name', '-') }}</h2>
+              <p class="muted">{{ lead.get('timestamp', '') }}</p>
+            </div>
+            <span class="status-pill">{{ lead.get('status', 'New') }}</span>
+          </div>
+
+          <div class="lead-grid">
+            <div><strong>WhatsApp</strong><br>{{ lead.get('whatsapp', '') }}</div>
+            <div><strong>Country</strong><br>{{ lead.get('country', '') }}</div>
+            <div><strong>SKU</strong><br>{{ lead.get('sku', '') or '-' }}</div>
+            <div><strong>Preferred time</strong><br>{{ lead.get('preferred_time', '') }}</div>
+          </div>
+
+          {% if lead.get('product_url') %}
+            <p><strong>Product:</strong> <a href="{{ lead.get('product_url') }}" target="_blank" rel="noopener">Open product</a></p>
+          {% endif %}
+
+          {% if lead.get('message') %}
+            <p><strong>Message:</strong> {{ lead.get('message') }}</p>
+          {% endif %}
+
+          <p class="muted small">
+            Source: {{ lead.get('source', '') or '-' }} | Campaign: {{ lead.get('campaign', '') or lead.get('utm_campaign', '') or '-' }} | Referrer: {{ lead.get('referrer', '') or '-' }}
+          </p>
+
+          <div class="lead-actions">
+            {% if lead.get('customer_wa_link') %}
+              <a class="wa-button" href="{{ lead.get('customer_wa_link') }}" target="_blank" rel="noopener">Open WhatsApp</a>
+            {% endif %}
+
+            <form action="{{ url_for('admin_update') }}" method="post" class="status-form">
+              <input type="hidden" name="row_number" value="{{ lead.get('row_number') }}">
+              <select name="status">
+                {% for status in status_options %}
+                  <option value="{{ status }}" {% if lead.get('status') == status %}selected{% endif %}>{{ status }}</option>
+                {% endfor %}
+              </select>
+              <input name="notes" type="text" placeholder="Notes" value="{{ lead.get('notes', '') }}">
+              <button type="submit">Update</button>
+            </form>
+          </div>
+        </article>
+      {% else %}
+        <section class="lead-card">
+          <p>No leads yet.</p>
+        </section>
+      {% endfor %}
+    </div>
+  </main>
+</body>
+</html>
