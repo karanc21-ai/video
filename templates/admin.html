@@ -3,80 +3,53 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Video Call Leads Admin | {{ brand_name }}</title>
+  <title>Admin | {{ brand_name }}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body class="admin-body">
+<body>
   <main class="admin-shell">
     <header class="admin-header">
       <div>
-        <div class="brand-mark">{{ brand_name }}</div>
-        <h1>Video Call Leads</h1>
+        <h1>{{ brand_name }} video-call leads</h1>
+        <p>{{ leads|length }} request(s)</p>
       </div>
-      <p>{{ leads|length }} lead{{ '' if leads|length == 1 else 's' }}</p>
+      <nav class="admin-nav">
+        <a href="{{ url_for('admin_products') }}">Ready products</a>
+        <a href="{{ url_for('admin_logout') }}">Logout</a>
+      </nav>
     </header>
-
-    {% with messages = get_flashed_messages(with_categories=true) %}
-      {% if messages %}
-        <div class="flash-wrap">
-          {% for category, message in messages %}
-            <div class="flash {{ category }}">{{ message }}</div>
-          {% endfor %}
-        </div>
-      {% endif %}
-    {% endwith %}
 
     <div class="lead-list">
       {% for lead in leads %}
         <article class="lead-card">
-          <div class="lead-top">
-            <div>
-              <h2>{{ lead.get('name', '-') }}</h2>
-              <p class="muted">{{ lead.get('timestamp', '') }}</p>
+          <div class="lead-media">
+            {% if lead.product_image_url %}<img src="{{ lead.product_image_url }}" alt="{{ lead.product_title }}">{% else %}<div class="image-fallback">No image</div>{% endif %}
+          </div>
+          <div class="lead-main">
+            <div class="lead-topline">
+              <strong>{{ lead.name }}</strong>
+              <span class="status-pill ready">{{ lead.status or 'New' }}</span>
             </div>
-            <span class="status-pill">{{ lead.get('status', 'New') }}</span>
+            <p><strong>WhatsApp:</strong> {{ lead.whatsapp }} &nbsp; <strong>Country:</strong> {{ lead.country }}</p>
+            <p><strong>Appointment:</strong> {{ lead.appointment_datetime }}</p>
+            <p><strong>Product:</strong> {{ lead.product_title }} {% if lead.sku %}({{ lead.sku }}){% endif %}</p>
+            {% if lead.product_url %}<p><a href="{{ lead.product_url }}" target="_blank" rel="noopener">Open product page</a></p>{% endif %}
+            {% if lead.message %}<p class="lead-message">{{ lead.message }}</p>{% endif %}
+            <p class="muted">Source: {{ lead.source }} / {{ lead.campaign }} · {{ lead.timestamp }}</p>
           </div>
-
-          <div class="lead-grid">
-            <div><strong>WhatsApp</strong><br>{{ lead.get('whatsapp', '') }}</div>
-            <div><strong>Country</strong><br>{{ lead.get('country', '') }}</div>
-            <div><strong>SKU</strong><br>{{ lead.get('sku', '') or '-' }}</div>
-            <div><strong>Preferred time</strong><br>{{ lead.get('preferred_time', '') }}</div>
-          </div>
-
-          {% if lead.get('product_url') %}
-            <p><strong>Product:</strong> <a href="{{ lead.get('product_url') }}" target="_blank" rel="noopener">Open product</a></p>
-          {% endif %}
-
-          {% if lead.get('message') %}
-            <p><strong>Message:</strong> {{ lead.get('message') }}</p>
-          {% endif %}
-
-          <p class="muted small">
-            Source: {{ lead.get('source', '') or '-' }} | Campaign: {{ lead.get('campaign', '') or lead.get('utm_campaign', '') or '-' }} | Referrer: {{ lead.get('referrer', '') or '-' }}
-          </p>
-
-          <div class="lead-actions">
-            {% if lead.get('customer_wa_link') %}
-              <a class="wa-button" href="{{ lead.get('customer_wa_link') }}" target="_blank" rel="noopener">Open WhatsApp</a>
-            {% endif %}
-
-            <form action="{{ url_for('admin_update') }}" method="post" class="status-form">
-              <input type="hidden" name="row_number" value="{{ lead.get('row_number') }}">
-              <select name="status">
-                {% for status in status_options %}
-                  <option value="{{ status }}" {% if lead.get('status') == status %}selected{% endif %}>{{ status }}</option>
-                {% endfor %}
-              </select>
-              <input name="notes" type="text" placeholder="Notes" value="{{ lead.get('notes', '') }}">
-              <button type="submit">Update</button>
-            </form>
-          </div>
+          <form class="lead-actions" method="post" action="{{ url_for('admin_update_status') }}">
+            <input type="hidden" name="row_number" value="{{ lead.row_number }}">
+            <select name="status">
+              {% for st in ['New','Contacted','Call Scheduled','Completed','Converted','Lost','Cancelled'] %}
+                <option value="{{ st }}" {% if lead.status == st %}selected{% endif %}>{{ st }}</option>
+              {% endfor %}
+            </select>
+            <input type="text" name="notes" placeholder="Notes" value="{{ lead.notes }}">
+            <button type="submit">Update</button>
+          </form>
         </article>
       {% else %}
-        <section class="lead-card">
-          <p>No leads yet.</p>
-        </section>
+        <div class="empty-state">No leads yet.</div>
       {% endfor %}
     </div>
   </main>
