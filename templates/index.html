@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>See Jewellery Live on Video | {{ brand_name }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="page-shell">
+    <section class="hero-card">
+      <div class="brand-mark">{{ brand_name }}</div>
+      <p class="eyebrow">Video shopping appointment</p>
+      <h1>See This Jewellery Live on Video</h1>
+      <p class="lead-text">
+        Book a quick video call before buying. Check size, color, shine, finish, and styling with our team.
+      </p>
+
+      <div class="trust-row">
+        <span>Actual product clarity</span>
+        <span>WhatsApp follow-up</span>
+        <span>Ready-to-ship friendly</span>
+      </div>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          <div class="flash-wrap">
+            {% for category, message in messages %}
+              <div class="flash {{ category }}">{{ message }}</div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      {% endwith %}
+
+      <form class="booking-form" action="{{ url_for('submit') }}" method="post">
+        <div class="field-grid">
+          <label>
+            Name <span>*</span>
+            <input name="name" type="text" autocomplete="name" required value="{{ defaults.get('name', '') }}">
+          </label>
+
+          <label>
+            WhatsApp number <span>*</span>
+            <input name="whatsapp" type="tel" autocomplete="tel" required placeholder="+91... / +1..." value="{{ defaults.get('whatsapp', '') }}">
+          </label>
+
+          <label>
+            Country <span>*</span>
+            <input name="country" type="text" autocomplete="country-name" required placeholder="India / USA / Canada..." value="{{ defaults.get('country', '') }}">
+          </label>
+
+          <label>
+            Product / SKU interested in
+            <input name="sku" type="text" placeholder="Example: NS 406" value="{{ defaults.get('sku', '') }}">
+          </label>
+        </div>
+
+        <label>
+          Preferred call time <span>*</span>
+          <input name="preferred_time" type="text" required placeholder="Example: Today after 6 PM IST / Tomorrow morning EST" value="{{ defaults.get('preferred_time', '') }}">
+        </label>
+
+        <label>
+          Message / requirement
+          <textarea name="message" rows="4" placeholder="Tell us what you want to see on video: size, matching earrings, bridal use, delivery timeline, etc.">{{ defaults.get('message', '') }}</textarea>
+        </label>
+
+        <input type="hidden" name="product_url" value="{{ defaults.get('product_url', '') }}">
+        <input type="hidden" name="source" value="{{ defaults.get('source', '') }}">
+        <input type="hidden" name="campaign" value="{{ defaults.get('campaign', '') }}">
+        <input type="hidden" name="utm_source" value="{{ defaults.get('utm_source', '') }}">
+        <input type="hidden" name="utm_medium" value="{{ defaults.get('utm_medium', '') }}">
+        <input type="hidden" name="utm_campaign" value="{{ defaults.get('utm_campaign', '') }}">
+        <input type="hidden" id="referrer" name="referrer" value="{{ defaults.get('referrer', '') }}">
+
+        <p class="consent-text">
+          By submitting, you agree that {{ brand_name }} may contact you on WhatsApp about this video-call request.
+        </p>
+
+        <button type="submit">Book Video Call</button>
+      </form>
+    </section>
+  </main>
+
+  <script>
+    (function () {
+      var ref = document.getElementById('referrer');
+      if (ref && !ref.value) {
+        ref.value = document.referrer || '';
+      }
+    })();
+  </script>
+</body>
+</html>
