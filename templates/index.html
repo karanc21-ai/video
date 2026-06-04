@@ -3,23 +3,58 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>See Jewellery Live on Video | {{ brand_name }}</title>
+  <title>{{ brand_name }} | Video Shopping Appointment</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <main class="page-shell">
-    <section class="hero-card">
-      <div class="brand-mark">{{ brand_name }}</div>
-      <p class="eyebrow">Video shopping appointment</p>
-      <h1>See This Jewellery Live on Video</h1>
-      <p class="lead-text">
-        Book a quick video call before buying. Check size, color, shine, finish, and styling with our team.
-      </p>
+    <section class="booking-card">
+      <div class="brand-strip">
+        <div class="brand-mark">R</div>
+        <div>
+          <div class="brand-name">{{ brand_name }}</div>
+          <div class="brand-subtitle">Video shopping appointment</div>
+        </div>
+      </div>
 
-      <div class="trust-row">
-        <span>Actual product clarity</span>
-        <span>WhatsApp follow-up</span>
-        <span>Ready-to-ship friendly</span>
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow">Ready-to-ship jewellery, shown live</p>
+          <h1>See this piece live before buying.</h1>
+          <p class="lead-text">Book a short 10-minute video call to check size, color, shine, finish, and actual product clarity with our team.</p>
+
+          <div class="trust-points">
+            <span>Actual product clarity</span>
+            <span>WhatsApp follow-up</span>
+            <span>Ready-to-ship friendly</span>
+          </div>
+        </div>
+
+        <div class="product-panel">
+          {% if product %}
+            <div class="product-image-wrap">
+              {% if product.image_url %}
+                <img src="{{ product.image_url }}" alt="{{ product.title }}">
+              {% else %}
+                <div class="image-fallback">No image</div>
+              {% endif %}
+            </div>
+            <div class="product-info">
+              <div class="status-pill {% if product.is_ready_to_ship %}ready{% else %}not-ready{% endif %}">
+                {% if product.is_ready_to_ship %}Ready to ship{% else %}Availability to be confirmed{% endif %}
+              </div>
+              <h2>{{ product.title }}</h2>
+              {% if product.sku %}<p class="muted">SKU: {{ product.sku }}</p>{% endif %}
+              {% if product.product_url %}<a href="{{ product.product_url }}" target="_blank" rel="noopener">Open product page</a>{% endif %}
+            </div>
+          {% else %}
+            <div class="missing-product">
+              <h2>Product not identified</h2>
+              <p>This booking link should come from a product page or a product-specific Instagram story link.</p>
+              {% if product_error %}<p class="small-error">{{ product_error }}</p>{% endif %}
+            </div>
+          {% endif %}
+        </div>
       </div>
 
       {% with messages = get_flashed_messages(with_categories=true) %}
@@ -32,63 +67,116 @@
         {% endif %}
       {% endwith %}
 
-      <form class="booking-form" action="{{ url_for('submit') }}" method="post">
-        <div class="field-grid">
-          <label>
-            Name <span>*</span>
-            <input name="name" type="text" autocomplete="name" required value="{{ defaults.get('name', '') }}">
-          </label>
+      {% if not_ready %}
+        <div class="blocking-note">
+          This item is not currently marked as ready-to-ship, so video booking is disabled for this link.
+        </div>
+      {% endif %}
 
-          <label>
-            WhatsApp number <span>*</span>
-            <input name="whatsapp" type="tel" autocomplete="tel" required placeholder="+91... / +1..." value="{{ defaults.get('whatsapp', '') }}">
-          </label>
+      {% if not booking_days %}
+        <div class="blocking-note">
+          No appointment slots are currently available. Please try again later.
+        </div>
+      {% endif %}
 
-          <label>
-            Country <span>*</span>
-            <input name="country" type="text" autocomplete="country-name" required placeholder="India / USA / Canada..." value="{{ defaults.get('country', '') }}">
-          </label>
+      <form class="booking-form" method="post" action="{{ url_for('submit') }}">
+        <input type="hidden" name="store" value="{{ product.store if product else defaults.store }}">
+        <input type="hidden" name="product_title" value="{{ product.title if product else '' }}">
+        <input type="hidden" name="sku" value="{{ product.sku if product else defaults.sku }}">
+        <input type="hidden" name="product_handle" value="{{ product.handle if product else defaults.handle }}">
+        <input type="hidden" name="product_url" value="{{ product.product_url if product else defaults.product_url }}">
+        <input type="hidden" name="product_image_url" value="{{ product.image_url if product else '' }}">
+        <input type="hidden" name="source" value="{{ defaults.source }}">
+        <input type="hidden" name="campaign" value="{{ defaults.campaign }}">
+        <input type="hidden" name="utm_source" value="{{ defaults.utm_source }}">
+        <input type="hidden" name="utm_medium" value="{{ defaults.utm_medium }}">
+        <input type="hidden" name="utm_campaign" value="{{ defaults.utm_campaign }}">
+        <input type="hidden" name="referrer" value="{{ defaults.referrer }}">
 
+        <div class="section-title">
+          <h3>Your appointment details</h3>
+          <p>Available Monday to Saturday, 4:00 PM to 7:30 PM India time.</p>
+        </div>
+
+        <div class="form-grid two">
           <label>
-            Product / SKU interested in
-            <input name="sku" type="text" placeholder="Example: NS 406" value="{{ defaults.get('sku', '') }}">
+            <span>Your name *</span>
+            <input type="text" name="name" autocomplete="name" required placeholder="e.g. Suhena">
+          </label>
+          <label>
+            <span>WhatsApp number *</span>
+            <input type="tel" name="whatsapp" autocomplete="tel" required placeholder="e.g. +91 98765 43210">
           </label>
         </div>
 
-        <label>
-          Preferred call time <span>*</span>
-          <input name="preferred_time" type="text" required placeholder="Example: Today after 6 PM IST / Tomorrow morning EST" value="{{ defaults.get('preferred_time', '') }}">
+        <div class="form-grid three">
+          <label>
+            <span>Country *</span>
+            <input type="text" name="country" required value="{{ default_country }}" placeholder="India / USA / Canada">
+          </label>
+          <label>
+            <span>Appointment date *</span>
+            <select name="appointment_date" id="appointment_date" required {% if not can_book %}disabled{% endif %}>
+              <option value="">Select date</option>
+              {% for day in booking_days %}
+                <option value="{{ day.value }}">{{ day.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Time slot *</span>
+            <select name="appointment_time" id="appointment_time" required {% if not can_book %}disabled{% endif %}>
+              <option value="">Select time</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="check-section">
+          <span class="field-title">What do you want to check on video?</span>
+          <div class="check-grid">
+            {% for key, label in checkbox_keys.items() %}
+              <label class="check-pill">
+                <input type="checkbox" name="checks" value="{{ key }}" {% if key in ['actual_product','size_scale','color_shine'] %}checked{% endif %}>
+                <span>{{ label }}</span>
+              </label>
+            {% endfor %}
+          </div>
+        </div>
+
+        <label class="full-width">
+          <span>Message / special request</span>
+          <textarea name="message" rows="4" placeholder="Example: I want to see how large the earrings look, or how bright the stones are in normal light."></textarea>
         </label>
 
-        <label>
-          Message / requirement
-          <textarea name="message" rows="4" placeholder="Tell us what you want to see on video: size, matching earrings, bridal use, delivery timeline, etc.">{{ defaults.get('message', '') }}</textarea>
-        </label>
+        <p class="consent-text">By submitting, you agree that {{ brand_name }} may contact you on WhatsApp about this video-call request.</p>
 
-        <input type="hidden" name="product_url" value="{{ defaults.get('product_url', '') }}">
-        <input type="hidden" name="source" value="{{ defaults.get('source', '') }}">
-        <input type="hidden" name="campaign" value="{{ defaults.get('campaign', '') }}">
-        <input type="hidden" name="utm_source" value="{{ defaults.get('utm_source', '') }}">
-        <input type="hidden" name="utm_medium" value="{{ defaults.get('utm_medium', '') }}">
-        <input type="hidden" name="utm_campaign" value="{{ defaults.get('utm_campaign', '') }}">
-        <input type="hidden" id="referrer" name="referrer" value="{{ defaults.get('referrer', '') }}">
-
-        <p class="consent-text">
-          By submitting, you agree that {{ brand_name }} may contact you on WhatsApp about this video-call request.
-        </p>
-
-        <button type="submit">Book Video Call</button>
+        <button class="primary-button" type="submit" {% if not can_book %}disabled{% endif %}>Book 10-Minute Video Call</button>
       </form>
     </section>
   </main>
 
   <script>
-    (function () {
-      var ref = document.getElementById('referrer');
-      if (ref && !ref.value) {
-        ref.value = document.referrer || '';
-      }
-    })();
+    const bookingDays = {{ booking_days_json | safe }};
+    const dateSelect = document.getElementById('appointment_date');
+    const timeSelect = document.getElementById('appointment_time');
+
+    function renderSlots() {
+      if (!dateSelect || !timeSelect) return;
+      const selectedDate = dateSelect.value;
+      timeSelect.innerHTML = '<option value="">Select time</option>';
+      const day = bookingDays.find(item => item.value === selectedDate);
+      if (!day) return;
+      day.slots.forEach(slot => {
+        const option = document.createElement('option');
+        option.value = slot.value;
+        option.textContent = slot.label;
+        timeSelect.appendChild(option);
+      });
+    }
+
+    if (dateSelect) {
+      dateSelect.addEventListener('change', renderSlots);
+    }
   </script>
 </body>
 </html>
