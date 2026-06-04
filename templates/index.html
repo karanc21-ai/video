@@ -105,7 +105,15 @@
           </label>
           <label>
             <span>WhatsApp number *</span>
-            <input type="tel" name="whatsapp" autocomplete="tel" required placeholder="e.g. +91 98765 43210">
+            <div class="phone-input-row">
+              <select name="country_code" class="country-code-select" aria-label="Country code" required>
+                {% for option in country_code_options %}
+                  <option value="{{ option.code }}" {% if option.code == default_country_code %}selected{% endif %}>{{ option.label }}</option>
+                {% endfor %}
+              </select>
+              <input type="tel" name="phone_number" autocomplete="tel-national" inputmode="tel" required placeholder="98765 43210">
+            </div>
+            <small class="input-help">Spaces are fine. Do not repeat the country code unless you type the full number with +.</small>
           </label>
         </div>
 
