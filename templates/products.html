@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ready Products | {{ brand_name }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="admin-shell">
+    <header class="admin-header">
+      <div>
+        <h1>Ready-to-ship product links</h1>
+        <p>Use these links for Instagram stories or Shopify buttons.</p>
+      </div>
+      <nav class="admin-nav">
+        <a href="{{ url_for('admin') }}">Leads</a>
+        <a href="{{ url_for('admin_logout') }}">Logout</a>
+      </nav>
+    </header>
+
+    <form class="product-search" method="get">
+      <select name="store">
+        <option value="in" {% if store == 'in' %}selected{% endif %}>India store</option>
+        <option value="us" {% if store == 'us' %}selected{% endif %}>US store</option>
+      </select>
+      <input type="text" name="q" value="{{ search }}" placeholder="Search title / handle / SKU">
+      <button type="submit">Search ready products</button>
+    </form>
+
+    {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+
+    <div class="product-grid-admin">
+      {% for product in products %}
+        <article class="admin-product-card">
+          {% if product.image_url %}<img src="{{ product.image_url }}" alt="{{ product.title }}">{% endif %}
+          <h2>{{ product.title }}</h2>
+          {% if product.sku %}<p class="muted">SKU: {{ product.sku }}</p>{% endif %}
+          <label>
+            <span>Instagram story link</span>
+            <input readonly value="{{ product.story_link }}" onclick="this.select()">
+          </label>
+          <label>
+            <span>Product-page link</span>
+            <input readonly value="{{ product.product_page_link }}" onclick="this.select()">
+          </label>
+        </article>
+      {% else %}
+        <div class="empty-state">No ready-to-ship products found in the first fetch. Try a narrower search.</div>
+      {% endfor %}
+    </div>
+  </main>
+</body>
+</html>
