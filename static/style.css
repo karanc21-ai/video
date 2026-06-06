@@ -147,6 +147,40 @@ h1 {
 
 .product-info { padding: 18px; }
 
+.store-visit-panel {
+  padding: 24px;
+  min-height: 100%;
+  display: grid;
+  align-content: center;
+  gap: 14px;
+}
+
+.store-visit-panel h2 {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 30px;
+  line-height: 1.1;
+  margin: 0;
+}
+
+.store-address {
+  margin: 0;
+  color: #3a2d22;
+  font-size: 17px;
+  line-height: 1.45;
+}
+
+.store-hours-box {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 14px;
+  background: rgba(255,255,255,0.6);
+  color: #3a2d22;
+}
+
+.store-hours-box span { color: var(--muted); }
+
 .product-info h2 {
   font-family: Georgia, "Times New Roman", serif;
   font-size: 22px;
@@ -451,6 +485,13 @@ select:disabled {
   background: #fffaf2;
   padding: 14px;
   border-radius: 18px;
+}
+
+.copy-link-card {
+  background: #fffaf2;
+  padding: 14px;
+  border-radius: 18px;
+  margin-bottom: 14px;
 }
 
 .product-grid-admin {
