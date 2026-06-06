@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ brand_name }} | Video Shopping Appointment</title>
+  <title>{{ brand_name }} | {{ appointment_config.page_title }}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -13,25 +13,40 @@
         <div class="brand-mark">R</div>
         <div>
           <div class="brand-name">{{ brand_name }}</div>
-          <div class="brand-subtitle">Video shopping appointment</div>
+          <div class="brand-subtitle">{{ appointment_config.subtitle }}</div>
         </div>
       </div>
 
       <div class="hero-grid">
         <div class="hero-copy">
-          <p class="eyebrow">Ready-to-ship jewellery, shown live</p>
-          <h1>See this piece live before buying.</h1>
-          <p class="lead-text">Book a short 10-minute video call to check size, color, shine, finish, and actual product clarity with our team.</p>
+          <p class="eyebrow">{{ appointment_config.eyebrow }}</p>
+          <h1>{{ appointment_config.headline }}</h1>
+          <p class="lead-text">{{ appointment_config.lead_text }}</p>
 
           <div class="trust-points">
-            <span>Actual product clarity</span>
-            <span>WhatsApp follow-up</span>
-            <span>Ready-to-ship friendly</span>
+            {% for point in appointment_config.trust_points %}
+              <span>{{ point }}</span>
+            {% endfor %}
           </div>
         </div>
 
         <div class="product-panel">
-          {% if product %}
+          {% if appointment_type == 'store_visit' %}
+            <div class="store-visit-panel">
+              <div class="status-pill ready">Amritsar store</div>
+              <h2>{{ appointment_config.location_name }}</h2>
+              <p class="store-address">{{ appointment_config.location_address }}</p>
+              <div class="store-hours-box">
+                <strong>Appointment hours</strong>
+                <span>Monday to Saturday</span>
+                <span>1:00 PM to 7:00 PM</span>
+                <span>Last appointment starts at 6:00 PM</span>
+              </div>
+              {% if appointment_config.location_map_url %}
+                <a href="{{ appointment_config.location_map_url }}" target="_blank" rel="noopener">Open in Google Maps</a>
+              {% endif %}
+            </div>
+          {% elif product %}
             <div class="product-image-wrap">
               {% if product.image_url %}
                 <img src="{{ product.image_url }}" alt="{{ product.title }}">
@@ -80,6 +95,7 @@
       {% endif %}
 
       <form class="booking-form" method="post" action="{{ url_for('submit') }}">
+        <input type="hidden" name="appointment_type" value="{{ appointment_type }}">
         <input type="hidden" name="store" value="{{ product.store if product else defaults.store }}">
         <input type="hidden" name="product_title" value="{{ product.title if product else '' }}">
         <input type="hidden" name="sku" value="{{ product.sku if product else defaults.sku }}">
@@ -95,7 +111,7 @@
 
         <div class="section-title">
           <h3>Your appointment details</h3>
-          <p>Available Monday to Saturday, 4:00 PM to 7:30 PM India time.</p>
+          <p>{{ appointment_config.details_note }}</p>
         </div>
 
         <div class="form-grid two">
@@ -140,11 +156,11 @@
         </div>
 
         <div class="check-section">
-          <span class="field-title">What do you want to check on video?</span>
+          <span class="field-title">{{ appointment_config.check_title }}</span>
           <div class="check-grid">
             {% for key, label in checkbox_keys.items() %}
               <label class="check-pill">
-                <input type="checkbox" name="checks" value="{{ key }}" {% if key in ['actual_product','size_scale','color_shine'] %}checked{% endif %}>
+                <input type="checkbox" name="checks" value="{{ key }}" {% if key in checkbox_defaults %}checked{% endif %}>
                 <span>{{ label }}</span>
               </label>
             {% endfor %}
@@ -153,12 +169,12 @@
 
         <label class="full-width">
           <span>Message / special request</span>
-          <textarea name="message" rows="4" placeholder="Example: I want to see how large the earrings look, or how bright the stones are in normal light."></textarea>
+          <textarea name="message" rows="4" placeholder="{{ appointment_config.message_placeholder }}"></textarea>
         </label>
 
-        <p class="consent-text">By submitting, you agree that {{ brand_name }} may contact you on WhatsApp about this video-call request.</p>
+        <p class="consent-text">{{ appointment_config.consent_text.replace('Rudradhan', brand_name) }}</p>
 
-        <button class="primary-button" type="submit" {% if not can_book %}disabled{% endif %}>Book 10-Minute Video Call</button>
+        <button class="primary-button" type="submit" {% if not can_book %}disabled{% endif %}>{{ appointment_config.button_text }}</button>
       </form>
     </section>
   </main>
