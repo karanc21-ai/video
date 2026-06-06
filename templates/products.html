@@ -3,21 +3,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ready Products | {{ brand_name }}</title>
+  <title>Booking Links | {{ brand_name }}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <main class="admin-shell">
     <header class="admin-header">
       <div>
-        <h1>Ready-to-ship product links</h1>
-        <p>Use these links for Instagram stories or Shopify buttons.</p>
+        <h1>Booking links</h1>
+        <p>Use video-call links for specific ready products, and the store-visit link for Amritsar appointments.</p>
       </div>
       <nav class="admin-nav">
         <a href="{{ url_for('admin') }}">Leads</a>
         <a href="{{ url_for('admin_logout') }}">Logout</a>
       </nav>
     </header>
+
+    <div class="copy-link-card">
+      <label>
+        <span>Amritsar store-visit link</span>
+        <input readonly value="{{ store_visit_link }}" onclick="this.select()">
+      </label>
+    </div>
 
     <form class="product-search" method="get">
       <select name="store">
@@ -37,11 +44,11 @@
           <h2>{{ product.title }}</h2>
           {% if product.sku %}<p class="muted">SKU: {{ product.sku }}</p>{% endif %}
           <label>
-            <span>Instagram story link</span>
+            <span>Instagram story video-call link</span>
             <input readonly value="{{ product.story_link }}" onclick="this.select()">
           </label>
           <label>
-            <span>Product-page link</span>
+            <span>Product-page video-call link</span>
             <input readonly value="{{ product.product_page_link }}" onclick="this.select()">
           </label>
         </article>
