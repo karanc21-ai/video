@@ -10,11 +10,11 @@
   <main class="admin-shell">
     <header class="admin-header">
       <div>
-        <h1>{{ brand_name }} video-call leads</h1>
+        <h1>{{ brand_name }} appointment leads</h1>
         <p>{{ leads|length }} request(s)</p>
       </div>
       <nav class="admin-nav">
-        <a href="{{ url_for('admin_products') }}">Ready products</a>
+        <a href="{{ url_for('admin_products') }}">Booking links</a>
         <a href="{{ url_for('admin_logout') }}">Logout</a>
       </nav>
     </header>
@@ -23,17 +23,23 @@
       {% for lead in leads %}
         <article class="lead-card">
           <div class="lead-media">
-            {% if lead.product_image_url %}<img src="{{ lead.product_image_url }}" alt="{{ lead.product_title }}">{% else %}<div class="image-fallback">No image</div>{% endif %}
+            {% if lead.product_image_url %}
+              <img src="{{ lead.product_image_url }}" alt="{{ lead.product_title }}">
+            {% else %}
+              <div class="image-fallback">{{ lead.appointment_label or 'Appointment' }}</div>
+            {% endif %}
           </div>
           <div class="lead-main">
             <div class="lead-topline">
               <strong>{{ lead.name }}</strong>
-              <span class="status-pill ready">{{ lead.status or 'New' }}</span>
+              <span class="status-pill ready">{{ lead.appointment_label or 'Video Call' }}</span>
+              <span class="status-pill not-ready">{{ lead.status or 'New' }}</span>
             </div>
             <p><strong>WhatsApp:</strong> {{ lead.whatsapp }} &nbsp; <strong>Country:</strong> {{ lead.country }}</p>
             {% if lead.phone_number %}<p class="muted"><strong>Typed number:</strong> {{ lead.country_code }} {{ lead.phone_number }}</p>{% endif %}
             <p><strong>Appointment:</strong> {{ lead.appointment_datetime }}</p>
-            <p><strong>Product:</strong> {{ lead.product_title }} {% if lead.sku %}({{ lead.sku }}){% endif %}</p>
+            {% if lead.appointment_location %}<p><strong>Location:</strong> {{ lead.appointment_location }}</p>{% endif %}
+            {% if lead.product_title %}<p><strong>Product:</strong> {{ lead.product_title }} {% if lead.sku %}({{ lead.sku }}){% endif %}</p>{% endif %}
             {% if lead.product_url %}<p><a href="{{ lead.product_url }}" target="_blank" rel="noopener">Open product page</a></p>{% endif %}
             {% if lead.message %}<p class="lead-message">{{ lead.message }}</p>{% endif %}
             <p class="muted">Source: {{ lead.source }} / {{ lead.campaign }} · {{ lead.timestamp }}</p>
@@ -41,7 +47,7 @@
           <form class="lead-actions" method="post" action="{{ url_for('admin_update_status') }}">
             <input type="hidden" name="row_number" value="{{ lead.row_number }}">
             <select name="status">
-              {% for st in ['New','Contacted','Call Scheduled','Completed','Converted','Lost','Cancelled'] %}
+              {% for st in ['New','Contacted','Appointment Scheduled','Call Scheduled','Completed','Converted','Lost','Cancelled'] %}
                 <option value="{{ st }}" {% if lead.status == st %}selected{% endif %}>{{ st }}</option>
               {% endfor %}
             </select>
