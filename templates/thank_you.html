@@ -13,14 +13,17 @@
         <div class="brand-mark">R</div>
         <div>
           <div class="brand-name">{{ brand_name }}</div>
-          <div class="brand-subtitle">Video shopping appointment</div>
+          <div class="brand-subtitle">{{ appointment_config.thank_you_subtitle }}</div>
         </div>
       </div>
       <div class="success-icon">✓</div>
       <h1>Request received.</h1>
       {% if appointment %}<p class="lead-text">Your selected slot is <strong>{{ appointment }}</strong>.</p>{% endif %}
-      <p class="lead-text">Our team will contact you on WhatsApp to confirm the video call.</p>
-      <a class="secondary-button" href="/book">Book another appointment</a>
+      <p class="lead-text">{{ appointment_config.thank_you_contact_text }}</p>
+      {% if appointment_config.type == 'store_visit' and appointment_config.location_address %}
+        <p class="muted">Location: {{ appointment_config.location_address }}</p>
+      {% endif %}
+      <a class="secondary-button" href="/book?appointment_type={{ appointment_config.type }}">Book another appointment</a>
     </section>
   </main>
 </body>
