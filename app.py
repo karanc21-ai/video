@@ -44,6 +44,14 @@ BOOKING_SLOT_END = os.getenv("BOOKING_SLOT_END", "19:30").strip()
 BOOKING_SLOT_INTERVAL_MINUTES = int(os.getenv("BOOKING_SLOT_INTERVAL_MINUTES", "10"))
 BOOKING_MIN_LEAD_MINUTES = int(os.getenv("BOOKING_MIN_LEAD_MINUTES", "60"))
 
+STORE_VISIT_LOCATION_NAME = os.getenv("STORE_VISIT_LOCATION_NAME", "Rudradhan Amritsar Store").strip()
+STORE_VISIT_ADDRESS = os.getenv("STORE_VISIT_ADDRESS", "42 Mall Road, Amritsar 143001").strip()
+STORE_VISIT_MAP_URL = os.getenv("STORE_VISIT_MAP_URL", "").strip()
+STORE_VISIT_SLOT_START = os.getenv("STORE_VISIT_SLOT_START", "13:00").strip()
+# Last in-store appointment can start at 6:00 PM.
+STORE_VISIT_SLOT_END = os.getenv("STORE_VISIT_SLOT_END", "18:00").strip()
+STORE_VISIT_SLOT_INTERVAL_MINUTES = int(os.getenv("STORE_VISIT_SLOT_INTERVAL_MINUTES", "30"))
+
 SHOPIFY_API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2025-07").strip() or "2025-07"
 DEFAULT_STORE = os.getenv("DEFAULT_STORE", "in").strip().lower() or "in"
 READY_METAFIELD_NAMESPACE = os.getenv("READY_METAFIELD_NAMESPACE", "custom").strip()
@@ -106,6 +114,9 @@ HEADERS = [
     "notes",
     "country_code",
     "phone_number",
+    "appointment_type",
+    "appointment_label",
+    "appointment_location",
 ]
 
 CHECKBOX_KEYS = {
@@ -116,6 +127,90 @@ CHECKBOX_KEYS = {
     "styling": "Styling advice",
     "ready_to_ship": "Ready-to-ship availability",
 }
+
+STORE_VISIT_CHECKBOX_KEYS = {
+    "actual_product": "See multiple products in person",
+    "size_scale": "Check size / scale",
+    "color_shine": "Check color and shine",
+    "weight_comfort": "Try weight / comfort",
+    "styling": "Styling guidance",
+    "ready_to_ship": "Ready-to-buy options",
+}
+
+
+def normalize_appointment_type(value):
+    raw = (value or "video_call").strip().lower().replace("-", "_")
+    if raw in {"store", "store_visit", "storevisit", "in_store", "in_store_visit", "visit"}:
+        return "store_visit"
+    return "video_call"
+
+
+def get_store_visit_map_url():
+    if STORE_VISIT_MAP_URL:
+        return STORE_VISIT_MAP_URL
+    if STORE_VISIT_ADDRESS:
+        return "https://www.google.com/maps/search/?api=1&query=" + quote_plus(STORE_VISIT_ADDRESS)
+    return ""
+
+
+def get_appointment_config(appointment_type):
+    appointment_type = normalize_appointment_type(appointment_type)
+    if appointment_type == "store_visit":
+        return {
+            "type": "store_visit",
+            "label": "Store Visit",
+            "subtitle": "Amritsar store appointment",
+            "page_title": "Store Visit Appointment",
+            "eyebrow": "Visit by appointment",
+            "headline": "Book a visit to our Amritsar store.",
+            "lead_text": "Choose a convenient slot to visit us, see multiple jewellery pieces, compare size, finish, color, and styling in person.",
+            "trust_points": ["Multiple products", "In-person viewing", "WhatsApp confirmation"],
+            "details_note": "Available Monday to Saturday, 1:00 PM to 6:00 PM India time.",
+            "check_title": "What would you like to see during your visit?",
+            "message_placeholder": "Example: I am looking for necklace sets and earrings for a wedding, preferably pearl and jadau styles.",
+            "consent_text": "By submitting, you agree that Rudradhan may contact you on WhatsApp about this store-visit request.",
+            "button_text": "Book Store Visit",
+            "thank_you_subtitle": "Amritsar store appointment",
+            "thank_you_contact_text": "Our team will contact you on WhatsApp to confirm your store visit.",
+            "slot_start": STORE_VISIT_SLOT_START,
+            "slot_end": STORE_VISIT_SLOT_END,
+            "slot_interval_minutes": STORE_VISIT_SLOT_INTERVAL_MINUTES,
+            "checkbox_keys": STORE_VISIT_CHECKBOX_KEYS,
+            "default_checks": ["actual_product", "size_scale", "color_shine"],
+            "requires_product": False,
+            "requires_ready_to_ship": False,
+            "location_name": STORE_VISIT_LOCATION_NAME,
+            "location_address": STORE_VISIT_ADDRESS,
+            "location_map_url": get_store_visit_map_url(),
+        }
+
+    return {
+        "type": "video_call",
+        "label": "Video Call",
+        "subtitle": "Video shopping appointment",
+        "page_title": "Video Shopping Appointment",
+        "eyebrow": "Ready-to-ship jewellery, shown live",
+        "headline": "See this piece live before buying.",
+        "lead_text": "Book a short 10-minute video call to check size, color, shine, finish, and actual product clarity with our team.",
+        "trust_points": ["Actual product clarity", "WhatsApp follow-up", "Ready-to-ship friendly"],
+        "details_note": "Available Monday to Saturday, 4:00 PM to 7:30 PM India time.",
+        "check_title": "What do you want to check on video?",
+        "message_placeholder": "Example: I want to see how large the earrings look, or how bright the stones are in normal light.",
+        "consent_text": "By submitting, you agree that Rudradhan may contact you on WhatsApp about this video-call request.",
+        "button_text": "Book 10-Minute Video Call",
+        "thank_you_subtitle": "Video shopping appointment",
+        "thank_you_contact_text": "Our team will contact you on WhatsApp to confirm the video call.",
+        "slot_start": BOOKING_SLOT_START,
+        "slot_end": BOOKING_SLOT_END,
+        "slot_interval_minutes": BOOKING_SLOT_INTERVAL_MINUTES,
+        "checkbox_keys": CHECKBOX_KEYS,
+        "default_checks": ["actual_product", "size_scale", "color_shine"],
+        "requires_product": True,
+        "requires_ready_to_ship": REQUIRE_READY_TO_SHIP,
+        "location_name": "",
+        "location_address": "",
+        "location_map_url": "",
+    }
 
 
 # -----------------------------
@@ -184,6 +279,9 @@ def get_all_leads():
     for i, row in enumerate(rows, start=2):
         lead = row_to_dict(row)
         lead["row_number"] = i
+        lead["appointment_type"] = normalize_appointment_type(lead.get("appointment_type"))
+        if not lead.get("appointment_label"):
+            lead["appointment_label"] = get_appointment_config(lead["appointment_type"])["label"]
         leads.append(lead)
     leads.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
     return leads
@@ -226,6 +324,9 @@ def append_lead_to_sheet(lead):
         lead.get("notes", ""),
         lead.get("country_code", ""),
         lead.get("phone_number", ""),
+        lead.get("appointment_type", "video_call"),
+        lead.get("appointment_label", "Video Call"),
+        lead.get("appointment_location", ""),
     ]
     worksheet.append_row(row, value_input_option="USER_ENTERED")
 
@@ -241,8 +342,9 @@ def update_lead_status(row_number, status, notes=""):
         worksheet.update_cell(row_number, notes_col, notes)
 
 
-def get_booked_slots():
-    """Return set of (appointment_date, appointment_time) already taken."""
+def get_booked_slots(appointment_type="video_call"):
+    """Return set of (appointment_date, appointment_time) already taken for one appointment type."""
+    appointment_type = normalize_appointment_type(appointment_type)
     try:
         leads = get_all_leads()
     except Exception as exc:
@@ -253,6 +355,9 @@ def get_booked_slots():
     for lead in leads:
         status = (lead.get("status") or "").strip().lower()
         if status in {"lost", "cancelled", "canceled"}:
+            continue
+        lead_type = normalize_appointment_type(lead.get("appointment_type"))
+        if lead_type != appointment_type:
             continue
         d = (lead.get("appointment_date") or "").strip()
         t = (lead.get("appointment_time") or "").strip()
@@ -487,9 +592,10 @@ def extract_handle_from_url(value):
     return ""
 
 
-def build_book_url(product, source="instagram_story", campaign="ready_to_ship_video_call"):
+def build_book_url(product, source="instagram_story", campaign="ready_to_ship_video_call", appointment_type="video_call"):
     base = request.url_root.rstrip("/") + url_for("book")
     params = {
+        "appointment_type": normalize_appointment_type(appointment_type),
         "store": product.get("store") or DEFAULT_STORE,
         "handle": product.get("handle") or "",
         "source": source,
@@ -517,14 +623,15 @@ def format_time_ampm(t):
     return f"{hour12}:{minute:02d} {suffix}"
 
 
-def generate_booking_dates_and_slots():
+def generate_booking_dates_and_slots(appointment_type="video_call"):
+    appointment_config = get_appointment_config(appointment_type)
     tz = ZoneInfo(BOOKING_TIMEZONE)
     now = datetime.now(tz)
-    start_t = parse_hhmm(BOOKING_SLOT_START)
-    end_t = parse_hhmm(BOOKING_SLOT_END)
-    interval = timedelta(minutes=BOOKING_SLOT_INTERVAL_MINUTES)
+    start_t = parse_hhmm(appointment_config["slot_start"])
+    end_t = parse_hhmm(appointment_config["slot_end"])
+    interval = timedelta(minutes=appointment_config["slot_interval_minutes"])
     min_lead = timedelta(minutes=BOOKING_MIN_LEAD_MINUTES)
-    booked = get_booked_slots()
+    booked = get_booked_slots(appointment_config["type"])
 
     days = []
     for offset in range(0, BOOKING_DAYS_AHEAD + 1):
@@ -554,8 +661,8 @@ def generate_booking_dates_and_slots():
     return days
 
 
-def is_valid_slot(appointment_date, appointment_time):
-    days = generate_booking_dates_and_slots()
+def is_valid_slot(appointment_date, appointment_time, appointment_type="video_call"):
+    days = generate_booking_dates_and_slots(appointment_type)
     for day in days:
         if day["value"] == appointment_date:
             return any(slot["value"] == appointment_time for slot in day["slots"])
@@ -678,7 +785,7 @@ def send_internal_alert(lead):
     Send internal team alert.
 
     Recommended Twilio/Meta template, no variables:
-    New Rudradhan video-call request received. Please open the admin dashboard
+    New Rudradhan appointment request received. Please open the admin dashboard
     to review the request and contact the customer.
     """
     alert_to = os.getenv("ALERT_WHATSAPP_TO", "").strip()
@@ -693,8 +800,9 @@ def send_internal_alert(lead):
     )
 
     dashboard_url = request.url_root.rstrip("/") + url_for("admin")
+    appointment_label = lead.get("appointment_label") or get_appointment_config(lead.get("appointment_type"))["label"]
     fallback_body = (
-        "New Rudradhan video-call request received. "
+        f"New Rudradhan {appointment_label.lower()} request received. "
         "Please open the admin dashboard to review the request and contact the customer.\n"
         f"{dashboard_url}"
     )
@@ -730,7 +838,7 @@ def send_customer_confirmation(lead):
     Optional customer confirmation.
 
     Recommended template:
-    Hi {{1}}, your Rudradhan video-call request for {{2}} on {{3}} at {{4}}
+    Hi {{1}}, your Rudradhan appointment request for {{2}} on {{3}} at {{4}}
     has been received. Our team will contact you on WhatsApp if any change is needed.
     """
     content_sid = os.getenv("TWILIO_CUSTOMER_CONTENT_SID", "").strip()
@@ -742,7 +850,11 @@ def send_customer_confirmation(lead):
         app.logger.info("Customer confirmation skipped: customer WhatsApp missing/invalid")
         return
 
-    product_label = lead.get("product_title") or lead.get("sku") or "your selected jewellery"
+    appointment_type = normalize_appointment_type(lead.get("appointment_type"))
+    if appointment_type == "store_visit":
+        product_label = "your Amritsar store visit"
+    else:
+        product_label = lead.get("product_title") or lead.get("sku") or "your selected jewellery"
     variables = {
         "1": lead.get("name", "") or "there",
         "2": product_label,
@@ -799,9 +911,17 @@ def index():
 
 @app.route("/book")
 def book():
-    product, product_error = fetch_product_from_request()
-    booking_days = generate_booking_dates_and_slots()
+    appointment_type = normalize_appointment_type(request.args.get("appointment_type", "video_call"))
+    appointment_config = get_appointment_config(appointment_type)
+
+    product = None
+    product_error = ""
+    if appointment_config["requires_product"]:
+        product, product_error = fetch_product_from_request()
+
+    booking_days = generate_booking_dates_and_slots(appointment_type)
     query_defaults = {
+        "appointment_type": appointment_type,
         "store": request.args.get("store", DEFAULT_STORE),
         "handle": request.args.get("handle", ""),
         "sku": request.args.get("sku", ""),
@@ -813,21 +933,26 @@ def book():
         "product_url": request.args.get("product_url", ""),
         "referrer": request.headers.get("Referer", ""),
     }
-    can_book = bool(product) and bool(booking_days)
+    can_book = bool(booking_days)
+    if appointment_config["requires_product"] and not product:
+        can_book = False
     not_ready = False
-    if product and REQUIRE_READY_TO_SHIP and not product.get("is_ready_to_ship"):
+    if product and appointment_config["requires_ready_to_ship"] and not product.get("is_ready_to_ship"):
         can_book = False
         not_ready = True
 
     return render_template(
         "index.html",
         brand_name=BRAND_NAME,
+        appointment_type=appointment_type,
+        appointment_config=appointment_config,
         product=product,
         product_error=product_error,
         defaults=query_defaults,
         booking_days=booking_days,
         booking_days_json=json.dumps(booking_days),
-        checkbox_keys=CHECKBOX_KEYS,
+        checkbox_keys=appointment_config["checkbox_keys"],
+        checkbox_defaults=appointment_config["default_checks"],
         can_book=can_book,
         not_ready=not_ready,
         default_country=DEFAULT_COUNTRY,
@@ -838,9 +963,11 @@ def book():
 
 @app.route("/submit", methods=["POST"])
 def submit():
+    appointment_type = normalize_appointment_type(request.form.get("appointment_type", "video_call"))
+    appointment_config = get_appointment_config(appointment_type)
     appointment_date = request.form.get("appointment_date", "").strip()
     appointment_time = request.form.get("appointment_time", "").strip()
-    if not is_valid_slot(appointment_date, appointment_time):
+    if not is_valid_slot(appointment_date, appointment_time, appointment_type):
         flash("That appointment slot is no longer available. Please choose another time.", "error")
         return redirect(request.referrer or url_for("book"))
 
@@ -857,7 +984,7 @@ def submit():
     whatsapp_number = build_twilio_whatsapp_number(country_code, phone_number)
 
     # Re-validate ready-to-ship where possible. Hidden fields are for convenience, not trust.
-    if REQUIRE_READY_TO_SHIP and (product_handle or sku):
+    if appointment_config["requires_ready_to_ship"] and (product_handle or sku):
         try:
             product = fetch_product_by_handle(store, product_handle) if product_handle else fetch_product_by_sku(store, sku)
             if product and not product.get("is_ready_to_ship"):
@@ -898,6 +1025,9 @@ def submit():
         "referrer": request.form.get("referrer", "").strip() or request.headers.get("Referer", ""),
         "status": "New",
         "notes": "",
+        "appointment_type": appointment_type,
+        "appointment_label": appointment_config["label"],
+        "appointment_location": appointment_config.get("location_address", "") if appointment_type == "store_visit" else "",
     }
 
     required = ["name", "phone_number", "country"]
@@ -909,12 +1039,18 @@ def submit():
     append_lead_to_sheet(lead)
     send_internal_alert(lead)
     send_customer_confirmation(lead)
-    return redirect(url_for("thank_you", appt=quote_plus(appt_text)))
+    return redirect(url_for("thank_you", appt=appt_text, appointment_type=appointment_type))
 
 
 @app.route("/thank-you")
 def thank_you():
-    return render_template("thank_you.html", brand_name=BRAND_NAME, appointment=request.args.get("appt", ""))
+    appointment_type = normalize_appointment_type(request.args.get("appointment_type", "video_call"))
+    return render_template(
+        "thank_you.html",
+        brand_name=BRAND_NAME,
+        appointment=request.args.get("appt", ""),
+        appointment_config=get_appointment_config(appointment_type),
+    )
 
 
 @app.route("/admin/login", methods=["GET", "POST"])
@@ -968,6 +1104,14 @@ def admin_products():
         p["story_link"] = build_book_url(p, source="instagram_story", campaign="ready_to_ship_video_call")
         p["product_page_link"] = build_book_url(p, source="product_page", campaign="ready_to_ship_video_call")
 
+    store_visit_link = request.url_root.rstrip("/") + url_for("book") + "?" + urlencode(
+        {
+            "appointment_type": "store_visit",
+            "source": "product_page",
+            "campaign": "amritsar_store_visit",
+        }
+    )
+
     return render_template(
         "products.html",
         brand_name=BRAND_NAME,
@@ -975,6 +1119,7 @@ def admin_products():
         store=store,
         search=search,
         error=error,
+        store_visit_link=store_visit_link,
     )
 
 
