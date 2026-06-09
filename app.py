@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import re
+import threading
+import time as time_module
 from datetime import datetime, date, time, timedelta
 from functools import wraps
 from urllib.parse import parse_qs, quote_plus, urlencode, urlparse
@@ -13,6 +15,7 @@ from flask import (
     Flask,
     abort,
     flash,
+    g,
     redirect,
     render_template,
     request,
@@ -29,6 +32,27 @@ app.secret_key = os.getenv("SECRET_KEY", "change-this-secret-key")
 logging.basicConfig(level=logging.INFO)
 
 
+@app.before_request
+def _start_request_timer():
+    g._request_started_at = time_module.perf_counter()
+
+
+@app.after_request
+def _log_request_timing(response):
+    started_at = getattr(g, "_request_started_at", None)
+    if started_at is not None:
+        elapsed_ms = round((time_module.perf_counter() - started_at) * 1000, 1)
+        response.headers["X-Response-Time-ms"] = str(elapsed_ms)
+        app.logger.info(
+            "request method=%s path=%s status=%s time_ms=%s",
+            request.method,
+            request.path,
+            response.status_code,
+            elapsed_ms,
+        )
+    return response
+
+
 # -----------------------------
 # Basic config
 # -----------------------------
@@ -43,6 +67,9 @@ BOOKING_SLOT_START = os.getenv("BOOKING_SLOT_START", "16:00").strip()
 BOOKING_SLOT_END = os.getenv("BOOKING_SLOT_END", "19:30").strip()
 BOOKING_SLOT_INTERVAL_MINUTES = int(os.getenv("BOOKING_SLOT_INTERVAL_MINUTES", "10"))
 BOOKING_MIN_LEAD_MINUTES = int(os.getenv("BOOKING_MIN_LEAD_MINUTES", "60"))
+BOOKED_SLOTS_CACHE_SECONDS = int(os.getenv("BOOKED_SLOTS_CACHE_SECONDS", "90"))
+SHOPIFY_TIMEOUT_SECONDS = int(os.getenv("SHOPIFY_TIMEOUT_SECONDS", "8"))
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 
 STORE_VISIT_LOCATION_NAME = os.getenv("STORE_VISIT_LOCATION_NAME", "Rudradhan Amritsar Store").strip()
 STORE_VISIT_ADDRESS = os.getenv("STORE_VISIT_ADDRESS", "42 Mall Road, Amritsar 143001").strip()
@@ -216,6 +243,12 @@ def get_appointment_config(appointment_type):
 # -----------------------------
 # Google Sheets
 # -----------------------------
+_WORKSHEET_CACHE = None
+_WORKSHEET_LOCK = threading.Lock()
+_BOOKED_SLOTS_CACHE = {}
+_BOOKED_SLOTS_LOCK = threading.Lock()
+
+
 def load_service_account_info():
     raw_b64 = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_B64", "").strip()
@@ -243,26 +276,41 @@ def load_service_account_info():
 
 
 def get_worksheet():
-    if not GOOGLE_SHEET_ID:
-        raise RuntimeError("GOOGLE_SHEET_ID is missing")
+    """Return a cached worksheet object.
 
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    credentials = Credentials.from_service_account_info(load_service_account_info(), scopes=scopes)
-    gc = gspread.authorize(credentials)
-    spreadsheet = gc.open_by_key(GOOGLE_SHEET_ID)
+    Without this cache, every request re-authorizes Google, opens the spreadsheet,
+    reads row 1, and then reads/writes data. That makes /book feel slow.
+    """
+    global _WORKSHEET_CACHE
+    if _WORKSHEET_CACHE is not None:
+        return _WORKSHEET_CACHE
 
-    try:
-        worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
-    except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=1000, cols=len(HEADERS) + 5)
+    with _WORKSHEET_LOCK:
+        if _WORKSHEET_CACHE is not None:
+            return _WORKSHEET_CACHE
 
-    existing_headers = worksheet.row_values(1)
-    if existing_headers != HEADERS:
-        worksheet.update("A1", [HEADERS])
-    return worksheet
+        if not GOOGLE_SHEET_ID:
+            raise RuntimeError("GOOGLE_SHEET_ID is missing")
+
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        credentials = Credentials.from_service_account_info(load_service_account_info(), scopes=scopes)
+        gc = gspread.authorize(credentials)
+        spreadsheet = gc.open_by_key(GOOGLE_SHEET_ID)
+
+        try:
+            worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=1000, cols=len(HEADERS) + 5)
+
+        existing_headers = worksheet.row_values(1)
+        if existing_headers != HEADERS:
+            worksheet.update("A1", [HEADERS])
+
+        _WORKSHEET_CACHE = worksheet
+        return worksheet
 
 
 def row_to_dict(row):
@@ -342,9 +390,32 @@ def update_lead_status(row_number, status, notes=""):
         worksheet.update_cell(row_number, notes_col, notes)
 
 
-def get_booked_slots(appointment_type="video_call"):
-    """Return set of (appointment_date, appointment_time) already taken for one appointment type."""
+def invalidate_booked_slots_cache(appointment_type=None):
+    with _BOOKED_SLOTS_LOCK:
+        if appointment_type:
+            _BOOKED_SLOTS_CACHE.pop(normalize_appointment_type(appointment_type), None)
+        else:
+            _BOOKED_SLOTS_CACHE.clear()
+
+
+def get_booked_slots(appointment_type="video_call", force_refresh=False):
+    """Return set of (appointment_date, appointment_time) already taken for one appointment type.
+
+    The booking page only needs near-real-time accuracy. We cache this briefly so
+    every visitor does not trigger a full Google Sheet read. The submit route
+    uses force_refresh=True before accepting a slot.
+    """
     appointment_type = normalize_appointment_type(appointment_type)
+    now_mono = time_module.monotonic()
+
+    if not force_refresh and BOOKED_SLOTS_CACHE_SECONDS > 0:
+        with _BOOKED_SLOTS_LOCK:
+            cached = _BOOKED_SLOTS_CACHE.get(appointment_type)
+            if cached:
+                cached_at, cached_value = cached
+                if now_mono - cached_at <= BOOKED_SLOTS_CACHE_SECONDS:
+                    return set(cached_value)
+
     try:
         leads = get_all_leads()
     except Exception as exc:
@@ -363,6 +434,10 @@ def get_booked_slots(appointment_type="video_call"):
         t = (lead.get("appointment_time") or "").strip()
         if d and t:
             booked.add((d, t))
+
+    with _BOOKED_SLOTS_LOCK:
+        _BOOKED_SLOTS_CACHE[appointment_type] = (now_mono, set(booked))
+
     return booked
 
 
@@ -394,7 +469,7 @@ def shopify_graphql(store_key, query, variables=None):
             "Content-Type": "application/json",
         },
         json={"query": query, "variables": variables or {}},
-        timeout=20,
+        timeout=SHOPIFY_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
     payload = response.json()
@@ -623,7 +698,7 @@ def format_time_ampm(t):
     return f"{hour12}:{minute:02d} {suffix}"
 
 
-def generate_booking_dates_and_slots(appointment_type="video_call"):
+def generate_booking_dates_and_slots(appointment_type="video_call", force_refresh=False):
     appointment_config = get_appointment_config(appointment_type)
     tz = ZoneInfo(BOOKING_TIMEZONE)
     now = datetime.now(tz)
@@ -631,7 +706,7 @@ def generate_booking_dates_and_slots(appointment_type="video_call"):
     end_t = parse_hhmm(appointment_config["slot_end"])
     interval = timedelta(minutes=appointment_config["slot_interval_minutes"])
     min_lead = timedelta(minutes=BOOKING_MIN_LEAD_MINUTES)
-    booked = get_booked_slots(appointment_config["type"])
+    booked = get_booked_slots(appointment_config["type"], force_refresh=force_refresh)
 
     days = []
     for offset in range(0, BOOKING_DAYS_AHEAD + 1):
@@ -662,7 +737,7 @@ def generate_booking_dates_and_slots(appointment_type="video_call"):
 
 
 def is_valid_slot(appointment_date, appointment_time, appointment_type="video_call"):
-    days = generate_booking_dates_and_slots(appointment_type)
+    days = generate_booking_dates_and_slots(appointment_type, force_refresh=True)
     for day in days:
         if day["value"] == appointment_date:
             return any(slot["value"] == appointment_time for slot in day["slots"])
@@ -780,7 +855,7 @@ def send_twilio_message(to_number, body=None, content_sid=None, content_variable
     return msg
 
 
-def send_internal_alert(lead):
+def send_internal_alert(lead, base_url=None):
     """
     Send internal team alert.
 
@@ -799,7 +874,7 @@ def send_internal_alert(lead):
         or os.getenv("TWILIO_CONTENT_SID", "").strip()
     )
 
-    dashboard_url = request.url_root.rstrip("/") + url_for("admin")
+    dashboard_url = (base_url or PUBLIC_BASE_URL or request.url_root.rstrip("/")) + url_for("admin")
     appointment_label = lead.get("appointment_label") or get_appointment_config(lead.get("appointment_type"))["label"]
     fallback_body = (
         f"New Rudradhan {appointment_label.lower()} request received. "
@@ -831,6 +906,27 @@ def format_customer_time(value):
         return format_time_ampm(time(int(hh), int(mm)))
     except Exception:
         return value or ""
+
+
+def send_notifications_async(lead, base_url):
+    """Send WhatsApp notifications after the customer has already been redirected.
+
+    This keeps /submit from feeling stuck if Twilio is slow. If a background
+    notification fails, the lead is still safely saved in Google Sheets.
+    """
+    lead_copy = dict(lead)
+
+    def worker():
+        try:
+            send_internal_alert(lead_copy, base_url=base_url)
+        except Exception as exc:
+            app.logger.exception("Async internal alert failed: %s", exc)
+        try:
+            send_customer_confirmation(lead_copy)
+        except Exception as exc:
+            app.logger.exception("Async customer confirmation failed: %s", exc)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def send_customer_confirmation(lead):
@@ -1036,9 +1132,15 @@ def submit():
         flash("Please fill name, WhatsApp number, and country.", "error")
         return redirect(request.referrer or url_for("book"))
 
-    append_lead_to_sheet(lead)
-    send_internal_alert(lead)
-    send_customer_confirmation(lead)
+    try:
+        append_lead_to_sheet(lead)
+        invalidate_booked_slots_cache(appointment_type)
+    except Exception as exc:
+        app.logger.exception("Lead sheet append failed: %s", exc)
+        flash("We could not save your request right now. Please try again or WhatsApp us directly.", "error")
+        return redirect(request.referrer or url_for("book", appointment_type=appointment_type))
+
+    send_notifications_async(lead, base_url=PUBLIC_BASE_URL or request.url_root.rstrip("/"))
     return redirect(url_for("thank_you", appt=appt_text, appointment_type=appointment_type))
 
 
