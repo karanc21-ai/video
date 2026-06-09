@@ -3,5 +3,5 @@ services:
     name: rudradhan-video-call-app
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    startCommand: gunicorn app:app --worker-class gthread --workers 1 --threads 8 --timeout 90 --access-logfile - --error-logfile -
     healthCheckPath: /healthz
