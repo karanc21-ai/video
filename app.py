@@ -911,6 +911,10 @@ def format_customer_time(value):
 def send_notifications_async(lead, base_url):
     """Send WhatsApp notifications after the customer has already been redirected.
 
+    The same approved customer confirmation template is sent to:
+    1. the customer who made the booking; and
+    2. every internal number listed in ALERT_WHATSAPP_TO.
+
     This keeps /submit from feeling stuck if Twilio is slow. If a background
     notification fails, the lead is still safely saved in Google Sheets.
     """
@@ -918,32 +922,25 @@ def send_notifications_async(lead, base_url):
 
     def worker():
         try:
-            send_internal_alert(lead_copy, base_url=base_url)
-        except Exception as exc:
-            app.logger.exception("Async internal alert failed: %s", exc)
-        try:
             send_customer_confirmation(lead_copy)
         except Exception as exc:
-            app.logger.exception("Async customer confirmation failed: %s", exc)
+            app.logger.exception("Async booking confirmation failed: %s", exc)
 
     threading.Thread(target=worker, daemon=True).start()
 
 
 def send_customer_confirmation(lead):
     """
-    Optional customer confirmation.
+    Send the approved customer confirmation template to the customer and also
+    send an identical copy to every number in ALERT_WHATSAPP_TO.
 
-    Recommended template:
+    Template:
     Hi {{1}}, your Rudradhan appointment request for {{2}} on {{3}} at {{4}}
     has been received. Our team will contact you on WhatsApp if any change is needed.
     """
     content_sid = os.getenv("TWILIO_CUSTOMER_CONTENT_SID", "").strip()
     if not content_sid:
-        return
-
-    to_number = normalize_whatsapp_for_twilio(lead.get("whatsapp", ""), lead.get("country", ""))
-    if not to_number:
-        app.logger.info("Customer confirmation skipped: customer WhatsApp missing/invalid")
+        app.logger.info("Booking confirmation skipped: TWILIO_CUSTOMER_CONTENT_SID not set")
         return
 
     appointment_type = normalize_appointment_type(lead.get("appointment_type"))
@@ -951,6 +948,7 @@ def send_customer_confirmation(lead):
         product_label = "your Amritsar store visit"
     else:
         product_label = lead.get("product_title") or lead.get("sku") or "your selected jewellery"
+
     variables = {
         "1": lead.get("name", "") or "there",
         "2": product_label,
@@ -958,10 +956,57 @@ def send_customer_confirmation(lead):
         "4": format_customer_time(lead.get("appointment_time", "")),
     }
 
-    try:
-        send_twilio_message(to_number=to_number, content_sid=content_sid, content_variables=variables)
-    except Exception as exc:
-        app.logger.exception("Twilio customer confirmation failed: %s", exc)
+    recipients = []
+
+    # Customer
+    customer_number = normalize_whatsapp_for_twilio(
+        lead.get("whatsapp", ""),
+        lead.get("country", ""),
+    )
+    if customer_number:
+        recipients.append(("customer", customer_number))
+    else:
+        app.logger.info("Customer confirmation skipped: customer WhatsApp missing/invalid")
+
+    # Internal alert number(s). Reuse the exact same approved template and variables.
+    alert_to = os.getenv("ALERT_WHATSAPP_TO", "").strip()
+    if alert_to:
+        for raw_number in alert_to.split(","):
+            alert_number = normalize_whatsapp_for_twilio(raw_number.strip())
+            if not alert_number:
+                continue
+
+            # Avoid sending twice if the alert number happens to equal the customer number.
+            if any(existing_number == alert_number for _, existing_number in recipients):
+                continue
+
+            recipients.append(("internal alert", alert_number))
+    else:
+        app.logger.info("ALERT_WHATSAPP_TO not set. Skipping internal copy.")
+
+    if not recipients:
+        app.logger.info("Booking confirmation skipped: no valid WhatsApp recipients")
+        return
+
+    for recipient_type, to_number in recipients:
+        try:
+            send_twilio_message(
+                to_number=to_number,
+                content_sid=content_sid,
+                content_variables=variables,
+            )
+            app.logger.info(
+                "Booking confirmation sent to %s: %s",
+                recipient_type,
+                to_number,
+            )
+        except Exception as exc:
+            app.logger.exception(
+                "Twilio booking confirmation failed for %s (%s): %s",
+                recipient_type,
+                to_number,
+                exc,
+            )
 
 
 def normalize_whatsapp_for_twilio(phone, country=""):
