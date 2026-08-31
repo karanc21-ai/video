@@ -6,6 +6,7 @@ import re
 import threading
 import time as time_module
 from datetime import datetime, date, time, timedelta
+from decimal import Decimal, InvalidOperation
 from functools import wraps
 from urllib.parse import parse_qs, quote_plus, urlencode, urlparse
 
@@ -86,6 +87,17 @@ READY_METAFIELD_KEY = os.getenv("READY_METAFIELD_KEY", "delivery_time").strip()
 READY_METAFIELD_VALUE = os.getenv("READY_METAFIELD_VALUE", "2-5 Days Across India").strip()
 REQUIRE_READY_TO_SHIP = os.getenv("REQUIRE_READY_TO_SHIP", "true").strip().lower() in {"1", "true", "yes", "y"}
 READY_PRODUCT_FETCH_LIMIT = int(os.getenv("READY_PRODUCT_FETCH_LIMIT", "100"))
+
+# Daily custom.price price-band sync (India store by default).
+PRICE_BAND_SYNC_ENABLED = os.getenv("PRICE_BAND_SYNC_ENABLED", "true").strip().lower() in {"1", "true", "yes", "y"}
+PRICE_BAND_SYNC_STORE = os.getenv("PRICE_BAND_SYNC_STORE", "in").strip().lower() or "in"
+PRICE_BAND_SYNC_TIMEZONE = os.getenv("PRICE_BAND_SYNC_TIMEZONE", "Asia/Kolkata").strip() or "Asia/Kolkata"
+PRICE_BAND_SYNC_HOUR = int(os.getenv("PRICE_BAND_SYNC_HOUR", "4"))
+PRICE_BAND_SYNC_MINUTE = int(os.getenv("PRICE_BAND_SYNC_MINUTE", "0"))
+PRICE_BAND_SYNC_STARTUP_DELAY_SECONDS = int(os.getenv("PRICE_BAND_SYNC_STARTUP_DELAY_SECONDS", "30"))
+PRICE_BAND_METAFIELD_NAMESPACE = os.getenv("PRICE_BAND_METAFIELD_NAMESPACE", "custom").strip() or "custom"
+PRICE_BAND_METAFIELD_KEY = os.getenv("PRICE_BAND_METAFIELD_KEY", "price").strip() or "price"
+PRICE_BAND_METAFIELD_TYPE = os.getenv("PRICE_BAND_METAFIELD_TYPE", "single_line_text_field").strip() or "single_line_text_field"
 
 DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY", "India").strip() or "India"
 DEFAULT_COUNTRY_CODE = os.getenv("DEFAULT_COUNTRY_CODE", "+91").strip() or "+91"
@@ -683,6 +695,301 @@ def build_book_url(product, source="instagram_story", campaign="ready_to_ship_vi
 
 
 # -----------------------------
+# Daily custom.price price-band sync
+# -----------------------------
+_PRICE_BAND_SYNC_LOCK = threading.Lock()
+_PRICE_BAND_SYNC_STATE = {
+    "running": False,
+    "last_started_at": None,
+    "last_finished_at": None,
+    "last_result": None,
+    "last_error": None,
+}
+
+
+def _price_to_decimal(value):
+    try:
+        return Decimal(str(value).replace(",", "").strip())
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def price_band_for_price(price):
+    """Return the exact allowed custom.price value for the first variant price."""
+    p = _price_to_decimal(price)
+    if p is None:
+        return None
+
+    # Keep the exact strings in sync with Shopify's allowed metafield choices.
+    if p <= Decimal("2500"):
+        return "INR 0-INR 2,500"
+    if p <= Decimal("5000"):
+        return "INR 2,500-INR 5,000"
+    if p <= Decimal("10000"):
+        return "INR 5,000 - INR 10,000"
+    if p <= Decimal("15000"):
+        return "INR 10,000 - INR 15,000"
+    if p <= Decimal("20000"):
+        return "INR 15,000 - INR 20,000"
+    if p <= Decimal("25000"):
+        return "INR 20,000- INR 25,000"
+    if p <= Decimal("50000"):
+        return "INR 25,000 - INR 50,000"
+    if p <= Decimal("100000"):
+        return "INR 50,000 - INR 100,000"
+    if p <= Decimal("500000"):
+        return "INR 100,000 - INR 500,000"
+    if p <= Decimal("1000000"):
+        return "INR 500,000 - INR 10,00,000"
+    return "Above INR 10,00,000"
+
+
+def _shopify_graphql_retry(store_key, query, variables=None, attempts=5):
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return shopify_graphql(store_key, query, variables or {})
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= attempts:
+                break
+            wait_seconds = min(2 ** (attempt - 1), 12)
+            app.logger.warning(
+                "price-band sync Shopify call failed attempt=%s/%s; retrying in %ss: %s",
+                attempt,
+                attempts,
+                wait_seconds,
+                exc,
+            )
+            time_module.sleep(wait_seconds)
+    raise last_exc
+
+
+def _set_price_band_batch(store_key, updates):
+    mutation = """
+    mutation SetPriceBands($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        metafields { id namespace key value }
+        userErrors { field message code }
+      }
+    }
+    """
+    inputs = [
+        {
+            "ownerId": row["product_id"],
+            "namespace": PRICE_BAND_METAFIELD_NAMESPACE,
+            "key": PRICE_BAND_METAFIELD_KEY,
+            "type": PRICE_BAND_METAFIELD_TYPE,
+            "value": row["expected"],
+        }
+        for row in updates
+    ]
+    data = _shopify_graphql_retry(store_key, mutation, {"metafields": inputs})
+    payload = data.get("metafieldsSet") or {}
+    errors = payload.get("userErrors") or []
+    if errors:
+        raise RuntimeError("metafieldsSet userErrors: " + json.dumps(errors, ensure_ascii=False))
+    return len(payload.get("metafields") or [])
+
+
+def run_price_band_sync(store_key=None):
+    """Scan every product, use its first variant price, and repair custom.price when needed."""
+    store_key = (store_key or PRICE_BAND_SYNC_STORE or "in").strip().lower()
+
+    if not _PRICE_BAND_SYNC_LOCK.acquire(blocking=False):
+        app.logger.info("price-band sync skipped because another run is already in progress")
+        return {"status": "already_running"}
+
+    _PRICE_BAND_SYNC_STATE.update(
+        running=True,
+        last_started_at=datetime.now(ZoneInfo(PRICE_BAND_SYNC_TIMEZONE)).isoformat(timespec="seconds"),
+        last_error=None,
+    )
+
+    summary = {
+        "status": "ok",
+        "store": store_key,
+        "products_scanned": 0,
+        "unchanged": 0,
+        "updates_needed": 0,
+        "updated": 0,
+        "skipped_no_variant": 0,
+        "skipped_bad_price": 0,
+        "failed_updates": 0,
+    }
+
+    try:
+        query = """
+        query PriceBandProducts($first: Int!, $after: String, $namespace: String!, $key: String!) {
+          products(first: $first, after: $after) {
+            nodes {
+              id
+              title
+              handle
+              status
+              variants(first: 1) { nodes { id price } }
+              metafield(namespace: $namespace, key: $key) { value }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+        """
+
+        after = None
+        pending = []
+        while True:
+            data = _shopify_graphql_retry(
+                store_key,
+                query,
+                {
+                    "first": 100,
+                    "after": after,
+                    "namespace": PRICE_BAND_METAFIELD_NAMESPACE,
+                    "key": PRICE_BAND_METAFIELD_KEY,
+                },
+            )
+            block = data.get("products") or {}
+            nodes = block.get("nodes") or []
+
+            for product in nodes:
+                summary["products_scanned"] += 1
+                variants = ((product.get("variants") or {}).get("nodes") or [])
+                if not variants:
+                    summary["skipped_no_variant"] += 1
+                    continue
+
+                first_price = variants[0].get("price")
+                expected = price_band_for_price(first_price)
+                if expected is None:
+                    summary["skipped_bad_price"] += 1
+                    continue
+
+                current = ((product.get("metafield") or {}).get("value") or "").strip()
+                if current == expected:
+                    summary["unchanged"] += 1
+                    continue
+
+                pending.append(
+                    {
+                        "product_id": product["id"],
+                        "title": product.get("title") or "",
+                        "handle": product.get("handle") or "",
+                        "price": str(first_price or ""),
+                        "current": current,
+                        "expected": expected,
+                    }
+                )
+                summary["updates_needed"] += 1
+
+                if len(pending) >= 25:
+                    try:
+                        summary["updated"] += _set_price_band_batch(store_key, pending)
+                    except Exception as batch_exc:
+                        # A single bad item should not prevent the other products from being repaired.
+                        app.logger.warning("price-band batch update failed; retrying individually: %s", batch_exc)
+                        for row in pending:
+                            try:
+                                summary["updated"] += _set_price_band_batch(store_key, [row])
+                            except Exception as item_exc:
+                                summary["failed_updates"] += 1
+                                app.logger.error(
+                                    "price-band update failed handle=%s price=%s expected=%s: %s",
+                                    row.get("handle"),
+                                    row.get("price"),
+                                    row.get("expected"),
+                                    item_exc,
+                                )
+                    pending = []
+
+            page_info = block.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            after = page_info.get("endCursor")
+
+        if pending:
+            try:
+                summary["updated"] += _set_price_band_batch(store_key, pending)
+            except Exception as batch_exc:
+                app.logger.warning("price-band final batch failed; retrying individually: %s", batch_exc)
+                for row in pending:
+                    try:
+                        summary["updated"] += _set_price_band_batch(store_key, [row])
+                    except Exception as item_exc:
+                        summary["failed_updates"] += 1
+                        app.logger.error(
+                            "price-band update failed handle=%s price=%s expected=%s: %s",
+                            row.get("handle"),
+                            row.get("price"),
+                            row.get("expected"),
+                            item_exc,
+                        )
+
+        if summary["failed_updates"]:
+            summary["status"] = "partial_success"
+
+        _PRICE_BAND_SYNC_STATE["last_result"] = dict(summary)
+        app.logger.info("price-band sync completed: %s", summary)
+        return summary
+
+    except Exception as exc:
+        summary["status"] = "error"
+        _PRICE_BAND_SYNC_STATE["last_result"] = dict(summary)
+        _PRICE_BAND_SYNC_STATE["last_error"] = str(exc)
+        app.logger.exception("price-band sync failed")
+        return summary
+    finally:
+        _PRICE_BAND_SYNC_STATE["running"] = False
+        _PRICE_BAND_SYNC_STATE["last_finished_at"] = datetime.now(
+            ZoneInfo(PRICE_BAND_SYNC_TIMEZONE)
+        ).isoformat(timespec="seconds")
+        _PRICE_BAND_SYNC_LOCK.release()
+
+
+def _seconds_until_next_price_band_sync():
+    tz = ZoneInfo(PRICE_BAND_SYNC_TIMEZONE)
+    now = datetime.now(tz)
+    target = now.replace(
+        hour=max(0, min(23, PRICE_BAND_SYNC_HOUR)),
+        minute=max(0, min(59, PRICE_BAND_SYNC_MINUTE)),
+        second=0,
+        microsecond=0,
+    )
+    if target <= now:
+        target += timedelta(days=1)
+    return max(1, int((target - now).total_seconds()))
+
+
+def _price_band_scheduler_loop():
+    # Run shortly after each deployment/restart so existing products are repaired promptly.
+    time_module.sleep(max(0, PRICE_BAND_SYNC_STARTUP_DELAY_SECONDS))
+    run_price_band_sync(PRICE_BAND_SYNC_STORE)
+
+    while True:
+        wait_seconds = _seconds_until_next_price_band_sync()
+        app.logger.info(
+            "next price-band sync in %ss at %02d:%02d %s",
+            wait_seconds,
+            PRICE_BAND_SYNC_HOUR,
+            PRICE_BAND_SYNC_MINUTE,
+            PRICE_BAND_SYNC_TIMEZONE,
+        )
+        time_module.sleep(wait_seconds)
+        run_price_band_sync(PRICE_BAND_SYNC_STORE)
+
+
+def start_price_band_scheduler():
+    if not PRICE_BAND_SYNC_ENABLED:
+        app.logger.info("daily price-band sync is disabled")
+        return
+    thread = threading.Thread(
+        target=_price_band_scheduler_loop,
+        name="price-band-sync",
+        daemon=True,
+    )
+    thread.start()
+
+
+# -----------------------------
 # Booking slots
 # -----------------------------
 def parse_hhmm(value):
@@ -1273,6 +1580,11 @@ def admin_products():
 @app.template_filter("yesno")
 def yesno_filter(value):
     return "Yes" if value else "No"
+
+
+# Gunicorn imports this module rather than executing __main__, so start the
+# single-process daily scheduler at import time. render.yaml uses one worker.
+start_price_band_scheduler()
 
 
 if __name__ == "__main__":
