@@ -46,28 +46,9 @@
                 <a href="{{ appointment_config.location_map_url }}" target="_blank" rel="noopener">Open in Google Maps</a>
               {% endif %}
             </div>
-          {% elif product %}
-            <div class="product-image-wrap">
-              {% if product.image_url %}
-                <img src="{{ product.image_url }}" alt="{{ product.title }}">
-              {% else %}
-                <div class="image-fallback">No image</div>
-              {% endif %}
-            </div>
-            <div class="product-info">
-              <div class="status-pill {% if product.is_ready_to_ship %}ready{% else %}not-ready{% endif %}">
-                {% if product.is_ready_to_ship %}Ready to ship{% else %}Availability to be confirmed{% endif %}
-              </div>
-              <h2>{{ product.title }}</h2>
-              {% if product.sku %}<p class="muted">SKU: {{ product.sku }}</p>{% endif %}
-              {% if product.product_url %}<a href="{{ product.product_url }}" target="_blank" rel="noopener">Open product page</a>{% endif %}
-            </div>
           {% else %}
-            <div class="missing-product">
-              <h2>Product not identified</h2>
-              <p>This booking link should come from a product page or a product-specific Instagram story link.</p>
-              {% if product_error %}<p class="small-error">{{ product_error }}</p>{% endif %}
-            </div>
+            <div id="product-loading" class="missing-product"><h2>Loading jewellery details…</h2><p>Checking product availability.</p></div>
+            <div id="product-result" hidden></div>
           {% endif %}
         </div>
       </div>
@@ -82,18 +63,8 @@
         {% endif %}
       {% endwith %}
 
-      {% if not_ready %}
-        <div class="blocking-note">
-          This item is not currently marked as ready-to-ship, so video booking is disabled for this link.
-        </div>
-      {% endif %}
-
-      {% if not booking_days %}
-        <div class="blocking-note">
-          No appointment slots are currently available. Please try again later.
-        </div>
-      {% endif %}
-
+      <div id="booking-loading" class="blocking-note" role="status">Checking available appointments…</div>
+      <div id="booking-error" class="blocking-note" role="alert" hidden></div>
       <form class="booking-form" method="post" action="{{ url_for('submit') }}">
         <input type="hidden" name="appointment_type" value="{{ appointment_type }}">
         <input type="hidden" name="store" value="{{ product.store if product else defaults.store }}">
@@ -180,15 +151,34 @@
   </main>
 
   <script>
-    const bookingDays = {{ booking_days_json | safe }};
     const dateSelect = document.getElementById('appointment_date');
     const timeSelect = document.getElementById('appointment_time');
+    const submitButton = document.querySelector('.booking-form button[type="submit"]');
+    const loadingNote = document.getElementById('booking-loading');
+    const errorNote = document.getElementById('booking-error');
+    const appointmentType = {{ appointment_type | tojson }};
+    const requiresProduct = {{ appointment_config.requires_product | tojson }};
+    let bookingDays = [];
+    let slotsReady = false;
+    let productReady = !requiresProduct;
+    const params = new URLSearchParams(location.search);
+    params.set('appointment_type', appointmentType);
 
+    function enableWhenReady() {
+      const enabled = slotsReady && productReady;
+      dateSelect.disabled = !enabled;
+      timeSelect.disabled = !enabled;
+      submitButton.disabled = !enabled;
+      if (enabled) loadingNote.hidden = true;
+    }
+    function showError(message) {
+      errorNote.textContent = message;
+      errorNote.hidden = false;
+      loadingNote.hidden = true;
+    }
     function renderSlots() {
-      if (!dateSelect || !timeSelect) return;
-      const selectedDate = dateSelect.value;
       timeSelect.innerHTML = '<option value="">Select time</option>';
-      const day = bookingDays.find(item => item.value === selectedDate);
+      const day = bookingDays.find(item => item.value === dateSelect.value);
       if (!day) return;
       day.slots.forEach(slot => {
         const option = document.createElement('option');
@@ -197,10 +187,88 @@
         timeSelect.appendChild(option);
       });
     }
-
-    if (dateSelect) {
-      dateSelect.addEventListener('change', renderSlots);
+    dateSelect.addEventListener('change', renderSlots);
+    async function loadSlots() {
+      try {
+        const response = await fetch('/booking-data/slots?' + params.toString());
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) throw Error(payload.error || 'Unable to load appointments.');
+        bookingDays = payload.days || [];
+        dateSelect.innerHTML = '<option value="">Select date</option>';
+        for (const day of bookingDays) {
+          const option = document.createElement('option');
+          option.value = day.value;
+          option.textContent = day.label;
+          dateSelect.appendChild(option);
+        }
+        if (!bookingDays.length) return showError('No appointment slots are currently available. Please try again later.');
+        slotsReady = true;
+        enableWhenReady();
+      } catch (error) { showError(error.message || 'Unable to load appointments. Please refresh.'); }
     }
+    function setHidden(name, value) {
+      const input = document.querySelector('input[type="hidden"][name="' + name + '"]');
+      if (input) input.value = value || '';
+    }
+    async function loadProduct() {
+      if (!requiresProduct) return;
+      const panel = document.getElementById('product-result');
+      try {
+        const response = await fetch('/booking-data/product?' + params.toString());
+        const data = await response.json();
+        const loading = document.getElementById('product-loading');
+        loading.hidden = true;
+        panel.hidden = false;
+        panel.replaceChildren();
+        if (!data.product) throw Error(data.error || 'Product not found.');
+        const product = data.product;
+        const imageWrap = document.createElement('div');
+        imageWrap.className = 'product-image-wrap';
+        if (product.image_url) {
+          const img = document.createElement('img');
+          img.src = product.image_url;
+          img.alt = product.title || 'Jewellery';
+          imageWrap.append(img);
+        }
+        panel.append(imageWrap);
+        const info = document.createElement('div');
+        info.className = 'product-info';
+        const status = document.createElement('div');
+        status.className = 'status-pill ' + (product.is_ready_to_ship ? 'ready' : 'not-ready');
+        status.textContent = product.is_ready_to_ship ? 'Ready to ship' : 'Availability to be confirmed';
+        info.append(status);
+        const heading = document.createElement('h2');
+        heading.textContent = product.title || 'Jewellery';
+        info.append(heading);
+        if (product.sku) {
+          const sku = document.createElement('p');
+          sku.className = 'muted';
+          sku.textContent = 'SKU: ' + product.sku;
+          info.append(sku);
+        }
+        if (product.product_url) {
+          const link = document.createElement('a');
+          link.href = product.product_url;
+          link.target = '_blank';
+          link.rel = 'noopener';
+          link.textContent = 'Open product page';
+          info.append(link);
+        }
+        panel.append(info);
+        for (const key of ['store', 'sku', 'product_title', 'product_url', 'product_image_url', 'product_handle']) {
+          const property = {product_title:'title', product_image_url:'image_url', product_handle:'handle'}[key] || key;
+          setHidden(key, product[property]);
+        }
+        if (!data.eligible) return showError('This item is not currently marked as ready-to-ship, so video booking is disabled for this link.');
+        productReady = true;
+        enableWhenReady();
+      } catch (error) {
+        document.getElementById('product-loading').hidden = true;
+        showError(error.message || 'Unable to check product availability. Please refresh.');
+      }
+    }
+    loadSlots();
+    loadProduct();
   </script>
 </body>
 </html>

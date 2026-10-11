@@ -3,9 +3,9 @@
 Isolated Blueprint and scheduler, intended to run inside the existing one-worker
 video booking Gunicorn service. No booking endpoint or booking function is modified.
 """
+import re
 import os
 import json
-import re
 import time
 import datetime
 import threading

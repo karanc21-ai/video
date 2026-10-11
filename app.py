@@ -14,6 +14,7 @@ import gspread
 import requests
 from flask import (
     Flask,
+    jsonify,
     abort,
     flash,
     g,
@@ -1362,12 +1363,10 @@ def book():
     appointment_type = normalize_appointment_type(request.args.get("appointment_type", "video_call"))
     appointment_config = get_appointment_config(appointment_type)
 
+    # Render the page immediately; browser fetches product and slots independently.
     product = None
     product_error = ""
-    if appointment_config["requires_product"]:
-        product, product_error = fetch_product_from_request()
-
-    booking_days = generate_booking_dates_and_slots(appointment_type)
+    booking_days = []
     query_defaults = {
         "appointment_type": appointment_type,
         "store": request.args.get("store", DEFAULT_STORE),
@@ -1381,14 +1380,8 @@ def book():
         "product_url": request.args.get("product_url", ""),
         "referrer": request.headers.get("Referer", ""),
     }
-    can_book = bool(booking_days)
-    if appointment_config["requires_product"] and not product:
-        can_book = False
+    can_book = False  # enabled only after both asynchronous checks finish
     not_ready = False
-    if product and appointment_config["requires_ready_to_ship"] and not product.get("is_ready_to_ship"):
-        can_book = False
-        not_ready = True
-
     return render_template(
         "index.html",
         brand_name=BRAND_NAME,
@@ -1407,6 +1400,29 @@ def book():
         default_country_code=normalize_country_code(DEFAULT_COUNTRY_CODE),
         country_code_options=COUNTRY_CODE_OPTIONS,
     )
+
+
+@app.route("/booking-data/slots")
+def booking_slots_data():
+    appointment_type = normalize_appointment_type(request.args.get("appointment_type", "video_call"))
+    try:
+        days = generate_booking_dates_and_slots(appointment_type)
+        return jsonify({"ok": True, "days": days})
+    except Exception:
+        app.logger.exception("Could not fetch available booking slots")
+        return jsonify({"ok": False, "error": "Appointment slots are unavailable. Please retry."}), 503
+
+
+@app.route("/booking-data/product")
+def booking_product_data():
+    appointment_type = normalize_appointment_type(request.args.get("appointment_type", "video_call"))
+    config = get_appointment_config(appointment_type)
+    if not config["requires_product"]:
+        return jsonify({"ok": True, "product": None, "eligible": True})
+    product, error = fetch_product_from_request()
+    eligible = bool(product) and (not config["requires_ready_to_ship"] or bool(product.get("is_ready_to_ship")))
+    return jsonify({"ok": bool(product), "product": product, "eligible": eligible,
+                    "error": error or ("Product not found. Please open the booking link from its product page." if not product else "")})
 
 
 @app.route("/submit", methods=["POST"])
