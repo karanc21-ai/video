@@ -1582,6 +1582,10 @@ def yesno_filter(value):
     return "Yes" if value else "No"
 
 
+from collection_reorder import register_collection_reorder
+register_collection_reorder(app)
+
+
 # Gunicorn imports this module rather than executing __main__, so start the
 # single-process daily scheduler at import time. render.yaml uses one worker.
 start_price_band_scheduler()
