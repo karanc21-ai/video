@@ -5,6 +5,7 @@ video booking Gunicorn service. No booking endpoint or booking function is modif
 """
 import os
 import json
+import re
 import time
 import datetime
 import threading
